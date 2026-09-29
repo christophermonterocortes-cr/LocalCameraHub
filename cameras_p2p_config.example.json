@@ -1,0 +1,22 @@
+[
+  {
+    "name": "Camera A",
+    "uid": "TNPXGBG-000000-XXXXX",
+    "ip": "192.168.0.100",
+    "password": "YOUR_CAMERA_PASSWORD",
+    "init_string": "YOUR_INIT_STRING_FROM_CLOUD_API",
+    "license": "XXXXXX",
+    "full_license": "XXXXXX:null",
+    "p2p_encrypt": "true"
+  },
+  {
+    "name": "Camera B",
+    "uid": "TNPXGBG-000000-YYYYY",
+    "ip": "192.168.0.101",
+    "password": "YOUR_CAMERA_PASSWORD",
+    "init_string": "YOUR_INIT_STRING_FROM_CLOUD_API",
+    "license": "YYYYYY",
+    "full_license": "YYYYYY:null",
+    "p2p_encrypt": "true"
+  }
+]
