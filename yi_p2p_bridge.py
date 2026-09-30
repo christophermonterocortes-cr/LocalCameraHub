@@ -56,6 +56,8 @@ class YiCameraStreamer:
         self.frame_count = 0
         self.fps = 0.0
         self.last_frame_time = 0
+        self.sid = -1
+        self.auth_bytes = None
         self.cond = threading.Condition()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
@@ -91,6 +93,7 @@ class YiCameraStreamer:
                 continue
 
             print(f"[{self.cam_id}] Session established (SID={sid}). Starting video...")
+            self.sid = sid
 
             chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
             nonce = "".join(random.choice(chars) for _ in range(15))
@@ -100,6 +103,7 @@ class YiCameraStreamer:
                 sig = sig[:15]
             auth_str = f"{nonce},{sig}"
             auth_bytes = auth_str.encode('ascii').ljust(32, b'\x00')
+            self.auth_bytes = auth_bytes
 
             payload = bytes([1, 1, 1, 0])
             hdr = struct.pack('>BBHI', 1, 3, 0, 40 + len(payload))
@@ -212,6 +216,7 @@ class YiCameraStreamer:
                 print(f"[{self.cam_id}] Exception in stream loop: {e}")
             finally:
                 self.online = False
+                self.sid = -1
                 try:
                     proc.stdin.close()
                     proc.terminate()
@@ -221,6 +226,33 @@ class YiCameraStreamer:
                 cdll.PPPP_Close(sid)
                 print(f"[{self.cam_id}] Session closed. Waiting 2s before retry...")
                 time.sleep(2)
+
+    def send_ptz(self, direction, speed=50):
+        """Send PTZ motor command via P2P channel 0.
+        
+        Uses command 9030 (motor control) with direction payload.
+        Direction mapping: up=0, down=1, left=2, right=3, stop=4
+        Also tries direction byte values 1-4 for up/down/left/right (variant B).
+        """
+        if self.sid < 0 or not self.auth_bytes:
+            return False, "Camera not connected"
+        
+        dir_map_a = {"up": 0, "down": 1, "left": 2, "right": 3, "stop": 4}
+        dir_map_b = {"up": 1, "down": 2, "left": 3, "right": 4, "stop": 0}
+        
+        dir_val = dir_map_a.get(direction)
+        if dir_val is None:
+            return False, f"Unknown direction: {direction}"
+        
+        # Try command 9030 with 4-byte payload: [direction, speed, 0, 0]
+        payload = struct.pack('>BBBB', dir_val, min(speed, 255), 0, 0)
+        hdr = struct.pack('>BBHI', 1, 3, 0, 40 + len(payload))
+        cmd_hdr = struct.pack('>HHHH', 9030, 1, 0, len(payload)) + self.auth_bytes
+        packet = hdr + cmd_hdr + payload
+        ret = cdll.PPPP_Write(self.sid, ctypes.c_byte(0), packet, len(packet))
+        
+        print(f"[{self.cam_id}] PTZ {direction} cmd=9030 payload={payload.hex()} => ret={ret}")
+        return ret >= 0, f"PTZ {direction} sent (ret={ret})"
 
 CAMERA_MANAGERS = {}
 
@@ -277,6 +309,32 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
             self.wfile.write(frame)
+            return
+
+        if action == "ptz":
+            # Parse query string for direction
+            from urllib.parse import urlparse, parse_qs
+            parsed = urlparse(self.path)
+            params = parse_qs(parsed.query)
+            direction = params.get("dir", ["stop"])[0].lower()
+            speed = int(float(params.get("speed", ["50"])[0]))
+            
+            success, msg = mgr.send_ptz(direction, speed)
+            
+            # Auto-stop after duration
+            duration = float(params.get("duration", ["0.35"])[0])
+            if direction != "stop" and duration > 0:
+                def auto_stop():
+                    time.sleep(duration)
+                    mgr.send_ptz("stop")
+                threading.Thread(target=auto_stop, daemon=True).start()
+            
+            resp = json.dumps({"success": success, "message": msg, "direction": direction})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(resp.encode())
             return
 
         if action == "video":

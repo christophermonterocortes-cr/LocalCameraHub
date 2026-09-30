@@ -61,7 +61,7 @@ CAMERAS = {
         "resolution": "1280x720 HD",
         "codec": "Direct P2P H.264 -> MJPEG",
         "status": "Online",
-        "has_ptz": False,
+        "has_ptz": True,
         "type": "yi_p2p"
     },
     "cam4": {
@@ -73,7 +73,7 @@ CAMERAS = {
         "resolution": "1280x720 HD",
         "codec": "Direct P2P H.264 -> MJPEG",
         "status": "Online",
-        "has_ptz": False,
+        "has_ptz": True,
         "type": "yi_p2p"
     }
 }
@@ -237,6 +237,16 @@ def snapshot(cam_id):
         pass
     return "Failed to capture snapshot from RTSP feed", 500
 
+@app.route("/api/bridge_status")
+def bridge_status():
+    """Proxies status from the P2P bridge for the dashboard to poll."""
+    try:
+        req = urllib.request.Request(f"{P2P_BRIDGE_URL}/status")
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return Response(r.read(), mimetype="application/json")
+    except Exception as e:
+        return jsonify({"error": str(e)})
+
 @app.route("/api/ptz/<cam_id>")
 def ptz_control(cam_id):
     cam = CAMERAS.get(cam_id)
@@ -247,6 +257,18 @@ def ptz_control(cam_id):
     speed = float(request.args.get("speed", 0.25))
     duration = float(request.args.get("duration", 0.35))
 
+    if cam.get("type") == "yi_p2p":
+        # Proxy PTZ command to P2P bridge
+        try:
+            ptz_url = f"{P2P_BRIDGE_URL}/{cam_id}/ptz?dir={direction}&speed={speed}&duration={duration}"
+            req = urllib.request.Request(ptz_url)
+            with urllib.request.urlopen(req, timeout=5) as r:
+                result = json.loads(r.read().decode("utf-8"))
+                return jsonify(result)
+        except Exception as e:
+            return jsonify({"success": False, "error": f"P2P PTZ error: {e}"})
+
+    # ONVIF cameras
     x, y = 0.0, 0.0
     if direction == "left":
         x = -speed
@@ -259,10 +281,7 @@ def ptz_control(cam_id):
     elif direction == "stop":
         duration = 0.0
 
-    if cam.get("type") == "tinycam":
-        success, msg = send_tinycam_ptz(cam["tinycam_id"], x, y, duration)
-    else:
-        success, msg = send_onvif_ptz(cam["ip"], cam["ptz_profile"], x, y, duration)
+    success, msg = send_onvif_ptz(cam["ip"], cam["ptz_profile"], x, y, duration)
     return jsonify({"success": success, "message": msg, "direction": direction})
 
 @app.route("/api/launch_player")
@@ -349,678 +368,1007 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Local Camera Hub - Live Feeds &amp; SD Player</title>
+    <title>Surveillance Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
-            --bg-primary: #0f172a;
-            --bg-secondary: #1e293b;
-            --bg-card: #182234;
+            --bg-base: #0a0e1a;
+            --bg-card: rgba(15, 23, 42, 0.8);
             --accent: #38bdf8;
-            --accent-hover: #0ea5e9;
-            --text-primary: #f8fafc;
-            --text-secondary: #94a3b8;
-            --border: #334155;
+            --accent-hover: #0284c7;
             --success: #22c55e;
             --warning: #f59e0b;
             --danger: #ef4444;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+            --border-color: rgba(56, 189, 248, 0.08);
+            --radius-card: 16px;
+            --radius-btn: 12px;
+            --radius-badge: 8px;
+            --sidebar-width: 200px;
+            --mobile-nav-height: 70px;
         }
-        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            background-color: var(--bg-primary);
-            color: var(--text-primary);
-            min-height: 100vh;
-            padding: 24px;
+            background-color: var(--bg-base);
+            color: var(--text-main);
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
         }
-        .header {
+
+        /* SVG Icons */
+        .icon {
+            width: 24px;
+            height: 24px;
+            fill: none;
+            stroke: currentColor;
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        /* Sidebar Desktop */
+        .sidebar {
+            width: var(--sidebar-width);
+            background: var(--bg-card);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-right: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+            padding: 24px 16px;
+            gap: 16px;
+            z-index: 50;
+        }
+
+        .brand {
+            font-weight: 700;
+            font-size: 1.25rem;
+            color: var(--text-main);
+            margin-bottom: 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .nav-item {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 12px 16px;
+            border-radius: var(--radius-btn);
+            color: var(--text-muted);
+            text-decoration: none;
+            font-weight: 500;
+            transition: all 0.2s;
+            cursor: pointer;
+            border: 1px solid transparent;
+        }
+
+        .nav-item:hover, .nav-item.active {
+            background: rgba(56, 189, 248, 0.1);
+            color: var(--accent);
+            border: 1px solid var(--border-color);
+            box-shadow: 0 0 15px rgba(56, 189, 248, 0.15);
+        }
+
+        /* Mobile Bottom Nav */
+        .mobile-nav {
+            display: none;
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: var(--mobile-nav-height);
+            background: var(--bg-card);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-top: 1px solid var(--border-color);
+            z-index: 100;
+            justify-content: space-around;
+            align-items: center;
+        }
+
+        .mobile-nav-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 4px;
+            color: var(--text-muted);
+            min-width: 44px;
+            min-height: 44px;
+            justify-content: center;
+            font-size: 0.75rem;
+            cursor: pointer;
+        }
+
+        .mobile-nav-item.active {
+            color: var(--accent);
+        }
+
+        /* Main Content */
+        .main-content {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow-y: auto;
+            position: relative;
+            scroll-behavior: smooth;
+        }
+
+        /* Top Bar */
+        .top-bar {
+            padding: 16px 24px;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 24px;
-            padding-bottom: 16px;
-            border-bottom: 1px solid var(--border);
+            background: rgba(10, 14, 26, 0.8);
+            backdrop-filter: blur(8px);
+            border-bottom: 1px solid var(--border-color);
+            position: sticky;
+            top: 0;
+            z-index: 40;
         }
-        .title-group h1 { font-size: 24px; font-weight: 700; color: var(--accent); }
-        .title-group p { font-size: 14px; color: var(--text-secondary); margin-top: 4px; }
-        .badge {
-            display: inline-flex;
-            align-items: center;
-            padding: 4px 10px;
-            border-radius: 9999px;
-            font-size: 12px;
+
+        .top-title {
+            font-size: 1.5rem;
             font-weight: 600;
         }
-        .badge-online { background-color: rgba(34, 197, 94, 0.15); color: var(--success); }
-        .badge-warning { background-color: rgba(245, 158, 11, 0.15); color: var(--warning); }
-        .dot { width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-        .dot-green { background-color: var(--success); box-shadow: 0 0 8px var(--success); }
-        .dot-orange { background-color: var(--warning); box-shadow: 0 0 8px var(--warning); }
-        
-        .grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
-            gap: 24px;
-            margin-bottom: 32px;
+
+        .bridge-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.875rem;
+            background: rgba(15, 23, 42, 0.6);
+            padding: 6px 12px;
+            border-radius: var(--radius-badge);
+            border: 1px solid var(--border-color);
         }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--success);
+            box-shadow: 0 0 8px var(--success);
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(1); opacity: 1; }
+            50% { transform: scale(1.5); opacity: 0.5; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+
+        .status-dot.pulsing {
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.offline {
+            background: var(--danger);
+            box-shadow: 0 0 8px var(--danger);
+            animation: none;
+        }
+
+        /* Camera Grid */
+        .grid-container {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 24px;
+            padding: 24px;
+            max-width: 1600px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
         .cam-card {
-            background-color: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: 12px;
+            background: var(--bg-card);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-card);
             overflow: hidden;
             display: flex;
             flex-direction: column;
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+            transition: all 0.3s;
+            position: relative;
         }
+
+        .cam-card:hover {
+            box-shadow: 0 8px 32px rgba(56, 189, 248, 0.1);
+            border-color: rgba(56, 189, 248, 0.2);
+        }
+
         .cam-header {
-            padding: 14px 18px;
-            background-color: var(--bg-secondary);
             display: flex;
             justify-content: space-between;
             align-items: center;
-            border-bottom: 1px solid var(--border);
+            padding: 12px 16px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
         }
-        .cam-header h3 { font-size: 16px; font-weight: 600; }
-        .video-container {
-            width: 100%;
-            aspect-ratio: 16 / 9;
-            background-color: #000;
+
+        .cam-title {
+            font-weight: 600;
+            font-size: 1rem;
             display: flex;
             align-items: center;
-            justify-content: center;
-            position: relative;
-            overflow: hidden;
+            gap: 8px;
         }
-        .video-feed {
+
+        .badge {
+            font-size: 0.75rem;
+            padding: 4px 8px;
+            border-radius: var(--radius-badge);
+            background: rgba(34, 197, 94, 0.1);
+            color: var(--success);
+            border: 1px solid rgba(34, 197, 94, 0.2);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .cam-video-wrapper {
+            position: relative;
+            width: 100%;
+            aspect-ratio: 16 / 9;
+            background: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .cam-video-wrapper img {
             width: 100%;
             height: 100%;
             object-fit: cover;
+            display: block;
         }
-        .video-placeholder {
-            text-align: center;
-            padding: 24px;
-            color: var(--text-secondary);
-        }
-        .video-placeholder svg { width: 44px; height: 44px; margin-bottom: 10px; stroke: var(--text-secondary); }
-        
-        /* PTZ Controls Bar */
-        .ptz-section {
-            background-color: #111a29;
-            padding: 10px 18px;
-            border-top: 1px solid var(--border);
-            border-bottom: 1px solid var(--border);
+
+        .skeleton-loader {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(90deg, #0a0e1a 25%, #152238 50%, #0a0e1a 75%);
+            background-size: 200% 100%;
+            animation: skeleton-loading 1.5s infinite;
+            z-index: 1;
             display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-        .ptz-label {
-            font-size: 12px;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            color: var(--accent);
-        }
-        .dpad-container {
-            display: grid;
-            grid-template-columns: repeat(3, 34px);
-            grid-template-rows: repeat(3, 34px);
-            gap: 4px;
-        }
-        .dpad-btn {
-            background-color: var(--bg-secondary);
-            border: 1px solid var(--border);
-            color: var(--text-primary);
-            border-radius: 6px;
-            display: flex;
-            align-items: center;
             justify-content: center;
-            cursor: pointer;
-            transition: all 0.1s ease;
+            align-items: center;
+            flex-direction: column;
+            gap: 12px;
+            color: var(--text-muted);
         }
-        .dpad-btn:hover {
-            background-color: var(--accent);
-            color: #0f172a;
-            border-color: var(--accent);
-        }
-        .dpad-btn:active { transform: scale(0.92); }
-        .dpad-btn svg { width: 16px; height: 16px; }
-        .dpad-stop {
-            background-color: rgba(239, 68, 68, 0.15);
-            color: var(--danger);
-            border-color: rgba(239, 68, 68, 0.3);
-        }
-        .dpad-stop:hover {
-            background-color: var(--danger);
-            color: #fff;
-            border-color: var(--danger);
+
+        @keyframes skeleton-loading {
+            0% { background-position: 200% 0; }
+            100% { background-position: -200% 0; }
         }
 
         .cam-footer {
-            padding: 14px 18px;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-            background-color: var(--bg-card);
-        }
-        .info-row {
+            padding: 16px;
             display: flex;
             justify-content: space-between;
-            font-size: 13px;
-            color: var(--text-secondary);
+            align-items: center;
+            gap: 12px;
         }
-        .info-value { color: var(--text-primary); font-family: monospace; font-size: 12px; }
-        .btn-group {
+        
+        .cam-actions {
             display: flex;
             gap: 8px;
-            flex-wrap: wrap;
         }
-        .btn {
-            flex: 1;
-            min-width: 80px;
-            padding: 8px 12px;
-            background-color: var(--bg-secondary);
-            border: 1px solid var(--border);
-            color: var(--text-primary);
-            border-radius: 6px;
-            font-size: 13px;
-            font-weight: 500;
-            cursor: pointer;
-            transition: all 0.15s ease;
-            text-align: center;
-            text-decoration: none;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-        }
-        .btn:hover { background-color: var(--border); }
-        .btn-primary { background-color: var(--accent); color: #0f172a; border-color: var(--accent); font-weight: 600; }
-        .btn-primary:hover { background-color: var(--accent-hover); }
 
-        /* Recorded Footage Section */
-        .records-section {
-            background-color: var(--bg-card);
-            border: 1px solid var(--border);
-            border-radius: 12px;
-            padding: 24px;
-            margin-top: 24px;
+        .btn-icon {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            color: var(--text-main);
+            border-radius: var(--radius-btn);
+            width: 40px;
+            height: 40px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            cursor: pointer;
+            transition: all 0.2s;
         }
-        .records-header {
+
+        .btn-icon:hover {
+            background: rgba(56, 189, 248, 0.1);
+            color: var(--accent);
+            border-color: var(--accent);
+        }
+
+        /* PTZ Controls */
+        .ptz-container {
+            position: relative;
+            width: 90px;
+            height: 90px;
+            border-radius: 50%;
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+        }
+
+        .ptz-btn {
+            position: absolute;
+            background: transparent;
+            border: none;
+            color: var(--text-muted);
+            cursor: pointer;
+            width: 30px;
+            height: 30px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            transition: all 0.2s;
+            border-radius: 50%;
+        }
+
+        .ptz-btn:hover {
+            color: var(--accent);
+            background: rgba(56, 189, 248, 0.1);
+        }
+
+        .ptz-btn svg {
+            width: 16px;
+            height: 16px;
+        }
+
+        .ptz-up { top: 0; left: 30px; }
+        .ptz-down { bottom: 0; left: 30px; }
+        .ptz-left { top: 30px; left: 0; }
+        .ptz-right { top: 30px; right: 0; }
+        .ptz-stop {
+            top: 30px;
+            left: 30px;
+            background: rgba(255, 255, 255, 0.1);
+        }
+        .ptz-stop:hover {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--danger);
+        }
+        .ptz-stop svg {
+            width: 12px;
+            height: 12px;
+            fill: currentColor;
+            stroke: none;
+        }
+
+        /* Recordings Section */
+        .recordings-section {
+            padding: 24px;
+            max-width: 1600px;
+            margin: 0 auto;
+            width: 100%;
+        }
+
+        .recordings-panel {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-card);
+            padding: 24px;
+            backdrop-filter: blur(12px);
+        }
+
+        .recordings-header {
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 16px;
+            margin-bottom: 20px;
         }
-        .records-header h2 { font-size: 18px; color: var(--accent); }
-        .player-layout {
+
+        .select-styled {
+            background: rgba(10, 14, 26, 0.8);
+            color: var(--text-main);
+            border: 1px solid var(--border-color);
+            padding: 10px 16px;
+            border-radius: var(--radius-btn);
+            font-size: 0.9rem;
+            outline: none;
+            cursor: pointer;
+            appearance: none;
+            min-width: 150px;
+        }
+
+        .btn {
+            background: var(--accent);
+            color: #000;
+            border: none;
+            padding: 10px 20px;
+            border-radius: var(--radius-btn);
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .btn:hover {
+            background: var(--accent-hover);
+            transform: translateY(-1px);
+        }
+
+        .btn-outline {
+            background: transparent;
+            color: var(--text-main);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-outline:hover {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-main);
+        }
+
+        .rec-grid {
             display: grid;
             grid-template-columns: 2fr 1fr;
-            gap: 20px;
+            gap: 24px;
         }
-        @media (max-width: 900px) {
-            .player-layout { grid-template-columns: 1fr; }
-        }
-        .video-player-wrapper {
-            background-color: #000;
-            border-radius: 8px;
-            overflow: hidden;
-            display: flex;
-            flex-direction: column;
-        }
-        .video-player-wrapper video {
-            width: 100%;
-            aspect-ratio: 16 / 9;
-            background-color: #000;
-        }
-        .player-meta {
-            padding: 12px;
-            background-color: var(--bg-secondary);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            font-size: 13px;
-        }
-        .clips-list {
-            background-color: var(--bg-secondary);
-            border: 1px solid var(--border);
-            border-radius: 8px;
-            max-height: 420px;
-            overflow-y: auto;
-            display: flex;
-            flex-direction: column;
-        }
-        .clip-item {
-            padding: 12px 14px;
-            border-bottom: 1px solid var(--border);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            cursor: pointer;
-            transition: background 0.15s ease;
-        }
-        .clip-item:hover { background-color: rgba(56, 189, 248, 0.1); }
-        .clip-item.active { background-color: rgba(56, 189, 248, 0.2); border-left: 3px solid var(--accent); }
-        .clip-name { font-family: monospace; font-size: 13px; font-weight: 600; }
-        .clip-sub { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
 
-        /* Non-blocking Toast Container */
-        #toast-container {
+        .video-player-container {
+            background: #000;
+            border-radius: var(--radius-btn);
+            overflow: hidden;
+            aspect-ratio: 16/9;
+            border: 1px solid var(--border-color);
+            display: flex;
+            flex-direction: column;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            background: #000;
+        }
+
+        .clips-list {
+            background: rgba(0,0,0,0.2);
+            border-radius: var(--radius-btn);
+            border: 1px solid var(--border-color);
+            overflow-y: auto;
+            max-height: 500px;
+        }
+
+        .clip-item {
+            padding: 12px 16px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            cursor: pointer;
+            transition: background 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .clip-item:hover, .clip-item.active {
+            background: rgba(56, 189, 248, 0.1);
+        }
+
+        /* Toast Notifications */
+        .toast-container {
             position: fixed;
             bottom: 24px;
             right: 24px;
-            z-index: 9999;
             display: flex;
             flex-direction: column;
-            gap: 10px;
+            gap: 12px;
+            z-index: 9999;
         }
+
         .toast {
-            min-width: 280px;
-            max-width: 400px;
-            background-color: var(--bg-secondary);
-            color: var(--text-primary);
-            padding: 12px 18px;
-            border-radius: 8px;
-            border-left: 4px solid var(--accent);
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
-            font-size: 14px;
+            background: var(--bg-card);
+            backdrop-filter: blur(12px);
+            border: 1px solid var(--border-color);
+            color: var(--text-main);
+            padding: 16px 20px;
+            border-radius: var(--radius-btn);
+            box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            transform: translateY(100%);
             opacity: 0;
-            transform: translateY(20px);
-            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
         }
+
         .toast.show {
-            opacity: 1;
             transform: translateY(0);
+            opacity: 1;
         }
-        .toast-success { border-left-color: var(--success); }
-        .toast-error { border-left-color: var(--danger); }
-        .toast-warning { border-left-color: var(--warning); }
-        .toast-info { border-left-color: var(--accent); }
+
+        .toast-icon {
+            color: var(--accent);
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .sidebar { display: none; }
+            .mobile-nav { display: flex; }
+            .main-content { margin-bottom: var(--mobile-nav-height); }
+            .grid-container { grid-template-columns: 1fr; padding: 16px; }
+            .rec-grid { grid-template-columns: 1fr; }
+            .clips-list { max-height: 300px; }
+        }
+
+        /* Fullscreen Video Fixes */
+        .cam-card:-webkit-full-screen {
+            width: 100vw;
+            height: 100vh;
+            border: none;
+            border-radius: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            background: #000;
+        }
+        .cam-card:fullscreen {
+            width: 100vw;
+            height: 100vh;
+            border: none;
+            border-radius: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            background: #000;
+        }
+        .cam-card:fullscreen .cam-video-wrapper {
+            height: 100%;
+        }
+        .cam-card:fullscreen .cam-header,
+        .cam-card:fullscreen .cam-footer {
+            position: absolute;
+            z-index: 10;
+            width: 100%;
+            background: rgba(0,0,0,0.5);
+            opacity: 0;
+            transition: opacity 0.3s;
+        }
+        .cam-card:fullscreen:hover .cam-header,
+        .cam-card:fullscreen:hover .cam-footer {
+            opacity: 1;
+        }
+        .cam-card:fullscreen .cam-footer {
+            bottom: 0;
+        }
     </style>
 </head>
 <body>
-    <div id="toast-container"></div>
-
-    <div class="header">
-        <div class="title-group">
-            <h1>Local Camera Hub</h1>
-            <p>Live RTSP Feeds, Motorized PTZ Controls &amp; SD Card Video Browser</p>
+    <!-- Desktop Sidebar -->
+    <aside class="sidebar">
+        <div class="brand">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+            Surveillance
         </div>
-        <button class="btn btn-primary" onclick="location.reload()" aria-label="Refresh All Feeds">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 4v6h-6M1 20v-6h6"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
-            Refresh Hub
-        </button>
-    </div>
+        <a href="#live" class="nav-item active" onclick="switchTab('live')">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M15.6 11.6L22 7v10l-6.4-4.5v-1zM4 5h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7c0-1.1.9-2 2-2z"></path></svg>
+            Live View
+        </a>
+        <a href="#recordings" class="nav-item" onclick="switchTab('recordings')">
+            <svg class="icon" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"></rect><line x1="7" y1="2" x2="7" y2="22"></line><line x1="17" y1="2" x2="17" y2="22"></line><line x1="2" y1="12" x2="22" y2="12"></line><line x1="2" y1="7" x2="7" y2="7"></line><line x1="2" y1="17" x2="7" y2="17"></line><line x1="17" y1="17" x2="22" y2="17"></line><line x1="17" y1="7" x2="22" y2="7"></line></svg>
+            Recordings
+        </a>
+        <a href="#settings" class="nav-item" onclick="switchTab('settings')">
+            <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            Settings
+        </a>
+    </aside>
 
-    <!-- Live Cameras Grid -->
-    <div class="grid">
-        <!-- Camera 1: 192.168.0.238 -->
-        <div class="cam-card">
-            <div class="cam-header">
-                <h3>{{ cameras.cam1.name }}</h3>
-                <span class="badge badge-online"><span class="dot dot-green"></span> Live RTSP</span>
-            </div>
-            <div class="video-container">
-                <img class="video-feed" src="/stream/cam1" alt="Camera 1 Live Stream" onerror="this.onerror=null; this.src=''; this.parentElement.innerHTML='<div class=\\'video-placeholder\\'>Stream reconnecting...</div>';">
-            </div>
-            
-            <div class="ptz-section">
-                <div>
-                    <span class="ptz-label">Motor PTZ Control</span>
-                    <p style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">Pan / Tilt Controls</p>
-                </div>
-                <div class="dpad-container">
-                    <div></div>
-                    <button class="dpad-btn" onclick="movePTZ('cam1', 'up')" title="Pan Up" aria-label="Pan Up">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"></polyline></svg>
-                    </button>
-                    <div></div>
-                    <button class="dpad-btn" onclick="movePTZ('cam1', 'left')" title="Pan Left" aria-label="Pan Left">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
-                    </button>
-                    <button class="dpad-btn dpad-stop" onclick="movePTZ('cam1', 'stop')" title="Stop Motor" aria-label="Stop Motor">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
-                    </button>
-                    <button class="dpad-btn" onclick="movePTZ('cam1', 'right')" title="Pan Right" aria-label="Pan Right">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
-                    </button>
-                    <div></div>
-                    <button class="dpad-btn" onclick="movePTZ('cam1', 'down')" title="Pan Down" aria-label="Pan Down">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
-                    </button>
-                    <div></div>
-                </div>
-            </div>
+    <!-- Mobile Bottom Nav -->
+    <nav class="mobile-nav">
+        <div class="mobile-nav-item active" onclick="switchTab('live')" id="mob-live">
+            <svg class="icon" viewBox="0 0 24 24"><path d="M15.6 11.6L22 7v10l-6.4-4.5v-1zM4 5h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7c0-1.1.9-2 2-2z"></path></svg>
+            <span>Live</span>
+        </div>
+        <div class="mobile-nav-item" onclick="switchTab('recordings')" id="mob-recordings">
+            <svg class="icon" viewBox="0 0 24 24"><rect x="2" y="2" width="20" height="20" rx="2.18" ry="2.18"></rect><line x1="7" y1="2" x2="7" y2="22"></line><line x1="17" y1="2" x2="17" y2="22"></line><line x1="2" y1="12" x2="22" y2="12"></line><line x1="2" y1="7" x2="7" y2="7"></line><line x1="2" y1="17" x2="7" y2="17"></line><line x1="17" y1="17" x2="22" y2="17"></line><line x1="17" y1="7" x2="22" y2="7"></line></svg>
+            <span>Clips</span>
+        </div>
+        <div class="mobile-nav-item" onclick="switchTab('settings')" id="mob-settings">
+            <svg class="icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            <span>Config</span>
+        </div>
+    </nav>
 
-            <div class="cam-footer">
-                <div class="info-row">
-                    <span>IP / Port:</span>
-                    <span class="info-value">{{ cameras.cam1.ip }}:554</span>
-                </div>
-                <div class="info-row">
-                    <span>Format:</span>
-                    <span class="info-value">{{ cameras.cam1.resolution }} ({{ cameras.cam1.codec }})</span>
-                </div>
-                <div class="btn-group">
-                    <button class="btn" onclick="launch('vlc', 'cam1')" aria-label="Open Camera 1 in VLC">Open in VLC</button>
-                    <button class="btn" onclick="launch('ffplay', 'cam1')" aria-label="Open Camera 1 in ffplay">Open in ffplay</button>
-                    <a class="btn" href="/snapshot/cam1" target="_blank" download="cam1_snapshot.jpg" aria-label="Download snapshot for Camera 1">Snapshot</a>
-                </div>
+    <main class="main-content">
+        <div class="top-bar">
+            <div class="top-title" id="page-title">Live Overview</div>
+            <div class="bridge-status" id="bridge-status" title="P2P Bridge Status">
+                <div class="status-dot pulsing" id="bridge-dot"></div>
+                <span id="bridge-text">Checking P2P Bridge...</span>
             </div>
         </div>
 
-        <!-- Camera 2: 192.168.0.11 -->
-        <div class="cam-card">
-            <div class="cam-header">
-                <h3>{{ cameras.cam2.name }}</h3>
-                <span class="badge badge-online"><span class="dot dot-green"></span> Live RTSP</span>
-            </div>
-            <div class="video-container">
-                <img class="video-feed" src="/stream/cam2" alt="Camera 2 Live Stream" onerror="this.onerror=null; this.src=''; this.parentElement.innerHTML='<div class=\\'video-placeholder\\'>Stream reconnecting...</div>';">
-            </div>
+        <!-- Live View Section -->
+        <div id="live-section" class="grid-container">
+            {% for cam_id, cam in cameras.items() %}
+            <div class="cam-card" id="card-{{ cam_id }}">
+                <div class="cam-header">
+                    <div class="cam-title">
+                        <svg class="icon" viewBox="0 0 24 24" style="width:18px;height:18px;color:var(--accent);"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path><circle cx="12" cy="13" r="4"></circle></svg>
+                        {{ cam.name }}
+                    </div>
+                    <div class="badge">ONLINE</div>
+                </div>
+                
+                <div class="cam-video-wrapper">
+                    <div class="skeleton-loader" id="loader-{{ cam_id }}">
+                        <svg class="icon" viewBox="0 0 24 24" style="width:32px;height:32px;animation: pulse 2s infinite;"><path d="M15.6 11.6L22 7v10l-6.4-4.5v-1zM4 5h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7c0-1.1.9-2 2-2z"></path></svg>
+                        <span>Connecting feed...</span>
+                    </div>
+                    <img src="/video_feed/{{ cam_id }}" onload="document.getElementById('loader-{{ cam_id }}').style.display='none'" onerror="this.src='data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25' viewBox='0 0 24 24' fill='none' stroke='%23ef4444' stroke-width='1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15.6 11.6L22 7v10l-6.4-4.5v-1zM4 5h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7c0-1.1.9-2 2-2z'/%3E%3Cline x1='2' y1='2' x2='22' y2='22'/%3E%3C/svg%3E'; document.getElementById('loader-{{ cam_id }}').style.display='none'" alt="Feed {{ cam.name }}">
+                </div>
 
-            <div class="ptz-section">
-                <div>
-                    <span class="ptz-label">Motor PTZ Control</span>
-                    <p style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">Pan / Tilt Controls</p>
-                </div>
-                <div class="dpad-container">
-                    <div></div>
-                    <button class="dpad-btn" onclick="movePTZ('cam2', 'up')" title="Pan Up" aria-label="Pan Up">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"></polyline></svg>
-                    </button>
-                    <div></div>
-                    <button class="dpad-btn" onclick="movePTZ('cam2', 'left')" title="Pan Left" aria-label="Pan Left">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
-                    </button>
-                    <button class="dpad-btn dpad-stop" onclick="movePTZ('cam2', 'stop')" title="Stop Motor" aria-label="Stop Motor">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
-                    </button>
-                    <button class="dpad-btn" onclick="movePTZ('cam2', 'right')" title="Pan Right" aria-label="Pan Right">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
-                    </button>
-                    <div></div>
-                    <button class="dpad-btn" onclick="movePTZ('cam2', 'down')" title="Pan Down" aria-label="Pan Down">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
-                    </button>
-                    <div></div>
-                </div>
-            </div>
+                <div class="cam-footer">
+                    {% if cam.has_ptz %}
+                    <div class="ptz-container">
+                        <button class="ptz-btn ptz-up" onclick="movePTZ('{{ cam_id }}', 'up')" aria-label="Pan Up">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>
+                        </button>
+                        <button class="ptz-btn ptz-down" onclick="movePTZ('{{ cam_id }}', 'down')" aria-label="Pan Down">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                        </button>
+                        <button class="ptz-btn ptz-left" onclick="movePTZ('{{ cam_id }}', 'left')" aria-label="Pan Left">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
+                        </button>
+                        <button class="ptz-btn ptz-right" onclick="movePTZ('{{ cam_id }}', 'right')" aria-label="Pan Right">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>
+                        </button>
+                        <button class="ptz-btn ptz-stop" onclick="movePTZ('{{ cam_id }}', 'stop')" aria-label="Stop PTZ">
+                            <svg viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12"></rect></svg>
+                        </button>
+                    </div>
+                    {% else %}
+                    <div style="width: 90px; color: var(--text-muted); font-size: 0.8rem; text-align: center;">Fixed Lens</div>
+                    {% endif %}
 
-            <div class="cam-footer">
-                <div class="info-row">
-                    <span>IP / Port:</span>
-                    <span class="info-value">{{ cameras.cam2.ip }}:554</span>
-                </div>
-                <div class="info-row">
-                    <span>Format:</span>
-                    <span class="info-value">{{ cameras.cam2.resolution }} ({{ cameras.cam2.codec }})</span>
-                </div>
-                <div class="btn-group">
-                    <button class="btn" onclick="launch('vlc', 'cam2')" aria-label="Open Camera 2 in VLC">Open in VLC</button>
-                    <button class="btn" onclick="launch('ffplay', 'cam2')" aria-label="Open Camera 2 in ffplay">Open in ffplay</button>
-                    <a class="btn" href="/snapshot/cam2" target="_blank" download="cam2_snapshot.jpg" aria-label="Download snapshot for Camera 2">Snapshot</a>
-                </div>
-            </div>
-        </div>
-
-        <!-- Camera 3: 192.168.0.4 (Temu Anyka / Yi IoT CB101) -->
-        <div class="cam-card">
-            <div class="cam-header">
-                <h3>{{ cameras.cam3.name }}</h3>
-                <span class="badge badge-online"><span class="dot dot-green"></span> Live Stream</span>
-            </div>
-            <div class="video-container">
-                <img class="video-feed" src="/stream/cam3" alt="Camera 3 Live Stream" onerror="this.onerror=null; this.src=''; this.parentElement.innerHTML='<div class=\'video-placeholder\'>Stream reconnecting...</div>';">
-            </div>
-
-            <div class="ptz-section">
-                <div>
-                    <span class="ptz-label">Motor PTZ Control</span>
-                    <p style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">Pan / Tilt Controls</p>
-                </div>
-                <div class="dpad-container">
-                    <div></div>
-                    <button class="dpad-btn" onclick="movePTZ('cam3', 'up')" title="Pan Up" aria-label="Pan Up">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"></polyline></svg>
-                    </button>
-                    <div></div>
-                    <button class="dpad-btn" onclick="movePTZ('cam3', 'left')" title="Pan Left" aria-label="Pan Left">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
-                    </button>
-                    <button class="dpad-btn dpad-stop" onclick="movePTZ('cam3', 'stop')" title="Stop Motor" aria-label="Stop Motor">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
-                    </button>
-                    <button class="dpad-btn" onclick="movePTZ('cam3', 'right')" title="Pan Right" aria-label="Pan Right">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
-                    </button>
-                    <div></div>
-                    <button class="dpad-btn" onclick="movePTZ('cam3', 'down')" title="Pan Down" aria-label="Pan Down">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
-                    </button>
-                    <div></div>
-                </div>
-            </div>
-
-            <div class="cam-footer">
-                <div class="info-row">
-                    <span>IP / Source:</span>
-                    <span class="info-value">{{ cameras.cam3.ip }} (P2P Bridge)</span>
-                </div>
-                <div class="info-row">
-                    <span>Format:</span>
-                    <span class="info-value">{{ cameras.cam3.resolution }} ({{ cameras.cam3.codec }})</span>
-                </div>
-                <div class="btn-group">
-                    <a class="btn" href="/snapshot/cam3" target="_blank" download="cam3_snapshot.jpg" aria-label="Download snapshot for Camera 3">Snapshot</a>
-                </div>
-            </div>
-        </div>
-
-        <!-- Camera 4: 192.168.0.135 (Temu Anyka / Yi IoT CB101) -->
-        <div class="cam-card">
-            <div class="cam-header">
-                <h3>{{ cameras.cam4.name }}</h3>
-                <span class="badge badge-online"><span class="dot dot-green"></span> Live Stream</span>
-            </div>
-            <div class="video-container">
-                <img class="video-feed" src="/stream/cam4" alt="Camera 4 Live Stream" onerror="this.onerror=null; this.src=''; this.parentElement.innerHTML='<div class=\'video-placeholder\'>Stream reconnecting...</div>';">
-            </div>
-
-            <div class="ptz-section">
-                <div>
-                    <span class="ptz-label">Motor PTZ Control</span>
-                    <p style="font-size: 11px; color: var(--text-secondary); margin-top: 2px;">Pan / Tilt Controls</p>
-                </div>
-                <div class="dpad-container">
-                    <div></div>
-                    <button class="dpad-btn" onclick="movePTZ('cam4', 'up')" title="Pan Up" aria-label="Pan Up">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="18 15 12 9 6 15"></polyline></svg>
-                    </button>
-                    <div></div>
-                    <button class="dpad-btn" onclick="movePTZ('cam4', 'left')" title="Pan Left" aria-label="Pan Left">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"></polyline></svg>
-                    </button>
-                    <button class="dpad-btn dpad-stop" onclick="movePTZ('cam4', 'stop')" title="Stop Motor" aria-label="Stop Motor">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="6" y="6" width="12" height="12" rx="2"></rect></svg>
-                    </button>
-                    <button class="dpad-btn" onclick="movePTZ('cam4', 'right')" title="Pan Right" aria-label="Pan Right">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 18 15 12 9 6"></polyline></svg>
-                    </button>
-                    <div></div>
-                    <button class="dpad-btn" onclick="movePTZ('cam4', 'down')" title="Pan Down" aria-label="Pan Down">
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
-                    </button>
-                    <div></div>
-                </div>
-            </div>
-
-            <div class="cam-footer">
-                <div class="info-row">
-                    <span>IP / Source:</span>
-                    <span class="info-value">{{ cameras.cam4.ip }} (P2P Bridge)</span>
-                </div>
-                <div class="info-row">
-                    <span>Format:</span>
-                    <span class="info-value">{{ cameras.cam4.resolution }} ({{ cameras.cam4.codec }})</span>
-                </div>
-                <div class="btn-group">
-                    <a class="btn" href="/snapshot/cam4" target="_blank" download="cam4_snapshot.jpg" aria-label="Download snapshot for Camera 4">Snapshot</a>
-                </div>
-            </div>
-        </div>
-    </div>
-
-    <!-- Recorded Footage Player Section -->
-    <div class="records-section">
-        <div class="records-header">
-            <div>
-                <h2>Recorded Camera Footage (SD Card)</h2>
-                <p style="font-size: 13px; color: var(--text-secondary); margin-top: 4px;" id="records-status">
-                    Scanning for SD card recordings...
-                </p>
-            </div>
-            <button class="btn" onclick="loadRecordings()" aria-label="Refresh Clips">Refresh Clips</button>
-        </div>
-
-        <div class="player-layout">
-            <div class="video-player-wrapper">
-                <video id="record-player" controls preload="metadata">
-                    Your browser does not support HTML5 video.
-                </video>
-                <div class="player-meta">
-                    <span id="playing-title" style="font-weight: 600;">Select a recording to play</span>
-                    <div style="display: flex; gap: 8px;">
-                        <button class="btn" id="btn-vlc-clip" style="display: none;" onclick="openSelectedInVLC()">Open in VLC</button>
-                        <a class="btn" id="btn-dl-clip" style="display: none;" download>Download MP4</a>
+                    <div class="cam-actions">
+                        <button class="btn-icon" onclick="launch('{{ cam_id }}')" title="Open Native Stream" aria-label="Open Stream">
+                            <svg class="icon" viewBox="0 0 24 24"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line></svg>
+                        </button>
+                        <a href="/snapshot/{{ cam_id }}" download="snapshot_{{ cam_id }}.jpg" class="btn-icon" title="Save Snapshot" aria-label="Save Snapshot">
+                            <svg class="icon" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+                        </a>
+                        <button class="btn-icon" onclick="toggleFullscreen('card-{{ cam_id }}')" title="Fullscreen" aria-label="Toggle Fullscreen">
+                            <svg class="icon" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"></path></svg>
+                        </button>
                     </div>
                 </div>
             </div>
+            {% endfor %}
+        </div>
 
-            <div class="clips-list" id="clips-list">
-                <div style="padding: 24px; text-align: center; color: var(--text-secondary); font-size: 13px;">
-                    No recordings loaded.
+        <!-- Recordings Section -->
+        <div id="recordings-section" class="recordings-section" style="display: none;">
+            <div class="recordings-panel">
+                <div class="recordings-header">
+                    <h2 style="font-size: 1.25rem; font-weight: 600;">SD Card Archives</h2>
+                    <div style="display: flex; gap: 12px; align-items: center;">
+                        <select id="rec-cam-select" class="select-styled" onchange="loadRecordings()">
+                            <option value="">-- All Cameras --</option>
+                            {% for cam_id, cam in cameras.items() %}
+                                <option value="{{ cam_id }}">{{ cam.name }}</option>
+                            {% endfor %}
+                        </select>
+                        <button class="btn btn-outline" onclick="loadRecordings()">
+                            <svg class="icon" viewBox="0 0 24 24" style="width: 16px; height: 16px;"><polyline points="23 4 23 10 17 10"></polyline><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
+                            Refresh
+                        </button>
+                        <button class="btn" onclick="openSelectedInVLC()" id="btn-vlc" disabled>
+                            <svg class="icon" viewBox="0 0 24 24" style="width: 16px; height: 16px;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                            Play in VLC
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="rec-grid">
+                    <div class="video-player-container">
+                        <video id="web-player" controls preload="none">
+                            <source src="" type="video/mp4">
+                            Your browser does not support HTML5 video.
+                        </video>
+                    </div>
+                    <div class="clips-list" id="clips-list">
+                        <div style="padding: 24px; text-align: center; color: var(--text-muted);">
+                            Loading clips...
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
-    </div>
+
+        <!-- Settings Section -->
+        <div id="settings-section" class="recordings-section" style="display: none;">
+            <div class="recordings-panel">
+                <h2 style="font-size: 1.25rem; font-weight: 600; margin-bottom: 20px;">System Configuration</h2>
+                <p style="color: var(--text-muted);">Configuration options and system diagnostics will appear here.</p>
+                <div style="margin-top: 24px; padding: 16px; background: rgba(0,0,0,0.2); border-radius: 8px; border: 1px solid var(--border-color);">
+                    <h3 style="font-size: 1rem; margin-bottom: 12px; color: var(--text-main);">Keyboard Shortcuts</h3>
+                    <ul style="color: var(--text-muted); list-style: none; display: flex; flex-direction: column; gap: 8px;">
+                        <li><kbd style="background: var(--bg-primary); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border-color);">1-4</kbd> : Focus/Fullscreen Camera 1-4</li>
+                        <li><kbd style="background: var(--bg-primary); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border-color);">Arrow Keys</kbd> : PTZ Control for hovered camera</li>
+                        <li><kbd style="background: var(--bg-primary); padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border-color);">Esc</kbd> : Exit Fullscreen</li>
+                    </ul>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Toasts -->
+    <div class="toast-container" id="toast-container"></div>
 
     <script>
-        let currentClipPath = null;
+        let selectedClipUrl = "";
+        let selectedClipPath = "";
+        
+        // Navigation
+        function switchTab(tabId) {
+            document.getElementById('live-section').style.display = 'none';
+            document.getElementById('recordings-section').style.display = 'none';
+            document.getElementById('settings-section').style.display = 'none';
+            
+            document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+            document.querySelectorAll('.mobile-nav-item').forEach(el => el.classList.remove('active'));
+            
+            document.getElementById(tabId + '-section').style.display = tabId === 'live' ? 'grid' : 'block';
+            
+            // Update active states based on href matching
+            const dnav = document.querySelector(`.nav-item[href="#${tabId}"]`);
+            if(dnav) dnav.classList.add('active');
+            
+            const mnav = document.getElementById(`mob-${tabId}`);
+            if(mnav) mnav.classList.add('active');
 
-        function showToast(message, type = "info") {
+            const titles = {
+                'live': 'Live Overview',
+                'recordings': 'Video Archives',
+                'settings': 'System Settings'
+            };
+            document.getElementById('page-title').innerText = titles[tabId];
+            
+            if(tabId === 'recordings' && !document.getElementById('clips-list').querySelector('.clip-item')) {
+                loadRecordings();
+            }
+        }
+
+        function showToast(message, type="info") {
             const container = document.getElementById("toast-container");
             const toast = document.createElement("div");
-            toast.className = `toast toast-${type}`;
-            toast.innerText = message;
+            toast.className = "toast";
+            
+            let iconSvg = '<svg class="icon toast-icon" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>';
+            if(type === "error") {
+                iconSvg = '<svg class="icon toast-icon" style="color:var(--danger)" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"></circle><line x1="15" y1="9" x2="9" y2="15"></line><line x1="9" y1="9" x2="15" y2="15"></line></svg>';
+            } else if (type === "success") {
+                iconSvg = '<svg class="icon toast-icon" style="color:var(--success)" viewBox="0 0 24 24"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>';
+            }
+            
+            toast.innerHTML = iconSvg + `<span>${message}</span>`;
             container.appendChild(toast);
             
-            setTimeout(() => { toast.classList.add("show"); }, 20);
+            // trigger reflow
+            void toast.offsetWidth;
+            toast.classList.add("show");
+            
             setTimeout(() => {
                 toast.classList.remove("show");
-                setTimeout(() => { toast.remove(); }, 300);
-            }, 3500);
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
         }
 
-        function movePTZ(camId, dir) {
-            fetch(`/api/ptz/${camId}?dir=${dir}&speed=0.25&duration=0.35`)
-                .then(r => r.json())
+        // PTZ and Streams
+        function movePTZ(cam_id, direction) {
+            fetch(`/ptz/${cam_id}/${direction}`, {method: 'POST'})
+                .then(res => res.json())
                 .then(data => {
-                    if (data.success) {
-                        showToast(`Moved ${camId} ${dir.toUpperCase()}`, "info");
+                    if(!data.success) showToast(data.error || "PTZ Error", "error");
+                })
+                .catch(err => showToast("Network error: " + err, "error"));
+        }
+
+        function launch(cam_id) {
+            fetch(`/launch/${cam_id}`, {method: 'POST'})
+                .then(res => res.json())
+                .then(data => {
+                    if(data.success) {
+                        showToast(`Opened ${cam_id} stream natively`, "success");
                     } else {
-                        showToast(`PTZ Error: ${data.error || data.message}`, "error");
+                        showToast(`Failed: ${data.error}`, "error");
                     }
                 })
-                .catch(e => showToast("PTZ request failed: " + e, "error"));
+                .catch(err => showToast("Network error: " + err, "error"));
         }
 
-        function launch(player, camId) {
-            showToast(`Launching ${player.toUpperCase()} for ${camId}...`, "info");
-            fetch(`/api/launch_player?player=${player}&cam_id=${camId}`)
-                .then(r => r.json())
-                .then(data => {
-                    if (data.success) {
-                        showToast(data.message, "success");
-                    } else {
-                        showToast(data.error, "error");
-                    }
-                })
-                .catch(e => showToast("Launch error: " + e, "error"));
+        // Fullscreen API
+        function toggleFullscreen(cardId) {
+            const el = document.getElementById(cardId);
+            if (!document.fullscreenElement) {
+                if (el.requestFullscreen) {
+                    el.requestFullscreen().catch(err => showToast(`Error attempting to enable fullscreen: ${err.message}`, "error"));
+                } else if (el.webkitRequestFullscreen) { /* Safari */
+                    el.webkitRequestFullscreen();
+                } else if (el.msRequestFullscreen) { /* IE11 */
+                    el.msRequestFullscreen();
+                }
+            } else {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                } else if (document.webkitExitFullscreen) { /* Safari */
+                    document.webkitExitFullscreen();
+                } else if (document.msExitFullscreen) { /* IE11 */
+                    document.msExitFullscreen();
+                }
+            }
         }
 
+        // Recordings
         function loadRecordings() {
-            const statusEl = document.getElementById("records-status");
-            const listEl = document.getElementById("clips-list");
-            statusEl.innerText = "Scanning drives for SD card recordings...";
-
-            fetch("/api/records")
-                .then(r => r.json())
+            const camSelect = document.getElementById("rec-cam-select").value;
+            const url = camSelect ? `/api/recordings?cam=${camSelect}` : `/api/recordings`;
+            
+            const listContainer = document.getElementById("clips-list");
+            listContainer.innerHTML = '<div style="padding: 24px; text-align: center; color: var(--text-muted);">Loading...</div>';
+            
+            fetch(url)
+                .then(res => res.json())
                 .then(data => {
-                    if (!data.success || data.clips.length === 0) {
-                        statusEl.innerText = "No SD card plugged into PC. Plug your camera's SD card into USB to browse recorded clips.";
-                        listEl.innerHTML = '<div style="padding: 24px; text-align: center; color: var(--text-secondary); font-size: 13px;">No recorded clips found on connected drives.</div>';
+                    if(data.error) {
+                        listContainer.innerHTML = `<div style="padding: 24px; color: var(--danger);">${data.error}</div>`;
+                        return;
+                    }
+                    
+                    if(data.clips.length === 0) {
+                        listContainer.innerHTML = `<div style="padding: 24px; text-align: center; color: var(--text-muted);">No recordings found</div>`;
                         return;
                     }
 
-                    statusEl.innerText = `Detected ${data.clips.length} recording(s) from camera SD card.`;
-                    listEl.innerHTML = "";
-
+                    let html = '';
                     data.clips.forEach((clip, index) => {
-                        const item = document.createElement("div");
-                        item.className = "clip-item";
-                        item.innerHTML = `
-                            <div>
-                                <div class="clip-name">${clip.filename}</div>
-                                <div class="clip-sub">${clip.date} • ${clip.size_mb} MB</div>
+                        html += `
+                        <div class="clip-item" id="clip-${index}" onclick="selectClip('${clip.url}', '${clip.path}', ${index})">
+                            <svg class="icon" viewBox="0 0 24 24" style="min-width: 24px;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
+                            <div style="overflow: hidden;">
+                                <div style="font-weight: 500; font-size: 0.9rem; text-overflow: ellipsis; white-space: nowrap; overflow: hidden;">${clip.filename}</div>
+                                <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">
+                                    Size: ${(clip.size_bytes / (1024*1024)).toFixed(1)} MB
+                                </div>
                             </div>
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
-                        `;
-                        item.onclick = () => selectClip(clip, item);
-                        listEl.appendChild(item);
-
-                        // Auto select first clip
-                        if (index === 0 && !currentClipPath) {
-                            selectClip(clip, item);
-                        }
+                        </div>`;
                     });
+                    listContainer.innerHTML = html;
                 })
-                .catch(e => {
-                    statusEl.innerText = "Error scanning records: " + e;
+                .catch(err => {
+                    listContainer.innerHTML = `<div style="padding: 24px; color: var(--danger);">Failed to load clips</div>`;
+                    showToast("Error loading recordings", "error");
                 });
         }
 
-        function selectClip(clip, itemEl) {
-            document.querySelectorAll(".clip-item").forEach(el => el.classList.remove("active"));
-            if (itemEl) itemEl.classList.add("active");
-
-            currentClipPath = clip.path;
-            const player = document.getElementById("record-player");
-            player.src = `/api/records/play?file=${encodeURIComponent(clip.path)}`;
-            player.load();
-            player.play().catch(() => {});
-
-            document.getElementById("playing-title").innerText = `${clip.filename} (${clip.date})`;
+        function selectClip(url, path, index) {
+            // Update active state
+            document.querySelectorAll('.clip-item').forEach(el => el.classList.remove('active'));
+            document.getElementById(`clip-${index}`).classList.add('active');
             
-            const btnVlc = document.getElementById("btn-vlc-clip");
-            btnVlc.style.display = "inline-flex";
-
-            const btnDl = document.getElementById("btn-dl-clip");
-            btnDl.style.display = "inline-flex";
-            btnDl.href = `/api/records/play?file=${encodeURIComponent(clip.path)}`;
-            btnDl.download = clip.filename;
+            selectedClipUrl = url;
+            selectedClipPath = path;
+            document.getElementById("btn-vlc").disabled = false;
+            
+            // Play in web player if browser supports it
+            const player = document.getElementById("web-player");
+            player.src = url;
+            player.play().catch(e => {
+                console.log("Browser couldn't auto-play this format", e);
+                showToast("Format might require VLC to play", "warning");
+            });
         }
 
         function openSelectedInVLC() {
-            if (!currentClipPath) return;
-            fetch(`/api/records/open_vlc?file=${encodeURIComponent(currentClipPath)}`)
-                .then(r => r.json())
-                .then(data => {
-                    if (data.success) showToast(data.message, "success");
-                    else showToast(data.error, "error");
-                });
+            if(!selectedClipPath) return;
+            
+            fetch('/api/play_vlc', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({file_path: selectedClipPath})
+            })
+            .then(res => res.json())
+            .then(data => {
+                if(data.success) {
+                    showToast("Clip opened in VLC", "success");
+                } else {
+                    showToast("Failed to open VLC: " + data.error, "error");
+                }
+            })
+            .catch(err => showToast("Network error", "error"));
         }
 
-        // Auto load recordings on page load
-        window.addEventListener("load", loadRecordings);
+        // Bridge Status Polling
+        function checkBridgeStatus() {
+            fetch('/api/bridge_status')
+                .then(res => {
+                    if(!res.ok) throw new Error("HTTP error");
+                    return res.json();
+                })
+                .then(data => {
+                    const dot = document.getElementById('bridge-dot');
+                    const txt = document.getElementById('bridge-text');
+                    if(data.status === 'online') {
+                        dot.className = 'status-dot pulsing';
+                        txt.innerText = 'P2P Bridge Active';
+                    } else {
+                        dot.className = 'status-dot offline';
+                        txt.innerText = 'P2P Bridge Offline';
+                    }
+                })
+                .catch(err => {
+                    // Fail silently or just update dot
+                    const dot = document.getElementById('bridge-dot');
+                    const txt = document.getElementById('bridge-text');
+                    dot.className = 'status-dot offline';
+                    txt.innerText = 'Bridge Unreachable';
+                });
+        }
+        
+        setInterval(checkBridgeStatus, 5000);
+        setTimeout(checkBridgeStatus, 1000); // Initial check
+
+        // Keyboard Shortcuts
+        document.addEventListener('keydown', function(e) {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+            
+            // 1-4 for camera focus
+            if (e.key >= '1' && e.key <= '4') {
+                const camId = `cam${e.key}`;
+                const card = document.getElementById(`card-${camId}`);
+                if (card) {
+                    toggleFullscreen(`card-${camId}`);
+                }
+            }
+        });
+        
+        // Track hovered camera for PTZ keyboard control
+        let hoveredCam = null;
+        document.querySelectorAll('.cam-card').forEach(card => {
+            card.addEventListener('mouseenter', () => {
+                hoveredCam = card.id.replace('card-', '');
+            });
+            card.addEventListener('mouseleave', () => {
+                hoveredCam = null;
+            });
+        });
+
+        document.addEventListener('keydown', function(e) {
+            if(!hoveredCam) return;
+            const arrows = {
+                'ArrowUp': 'up',
+                'ArrowDown': 'down',
+                'ArrowLeft': 'left',
+                'ArrowRight': 'right'
+            };
+            
+            if(arrows[e.key]) {
+                e.preventDefault();
+                movePTZ(hoveredCam, arrows[e.key]);
+            }
+        });
+        
+        document.addEventListener('keyup', function(e) {
+            if(!hoveredCam) return;
+            const arrows = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+            if(arrows.includes(e.key)) {
+                e.preventDefault();
+                movePTZ(hoveredCam, 'stop');
+            }
+        });
+
     </script>
 </body>
 </html>
