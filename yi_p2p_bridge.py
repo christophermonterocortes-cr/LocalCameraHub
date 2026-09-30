@@ -232,7 +232,6 @@ class YiCameraStreamer:
                 print(f"[{self.cam_id}] Exception in session monitor: {e}")
             finally:
                 session_active.clear()
-            finally:
                 self.online = False
                 self.sid = -1
                 try:
