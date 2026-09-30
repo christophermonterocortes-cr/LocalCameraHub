@@ -261,7 +261,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        parts = self.path.strip("/").split("/")
+        from urllib.parse import urlparse
+        parsed_url = urlparse(self.path)
+        parts = parsed_url.path.strip("/").split("/")
         if not parts or parts[0] == "":
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
