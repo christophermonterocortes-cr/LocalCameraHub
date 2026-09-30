@@ -65,11 +65,14 @@ The P2P bridge reverse-engineers the YI IoT protocol:
 | Command Channel | Channel 0 (bidirectional) |
 | I-Frame Channel | Channel 2 (keyframes, ~80KB) |
 | P-Frame Channel | Channel 3 (delta frames, ~1-13KB) |
-| Video Command | Code 9029 (start streaming) |
+| Video Stream Command | Code 9029 (`0x2345`) — Start streaming |
+| SD Playback Command | Code 9030 (`0x2346`) — SD card clip streaming |
+| PTZ Motor Move | Code 16402 (`0x4012`) — Payload: `<II` (dir: 1=UP, 2=DOWN, 3=LEFT, 4=RIGHT, speed: 0-100) |
+| PTZ Motor Stop | Code 16403 (`0x4013`) — Payload: empty (0 bytes) |
 | Auth Format | `nonce,HMAC-SHA1(password, "user=xiaoyiuser&nonce=" + nonce)` |
 | Encryption | AES-128-ECB, key = `password + "0"` |
 | Frame Header | 24 bytes (codec, flags, width, height, timestamp) |
-| Byte Order | Big-endian throughout |
+| Byte Order | Big-endian network headers, little-endian payload fields |
 
 ## Requirements
 

@@ -139,8 +139,53 @@ def generate_mjpeg(rtsp_url):
         except:
             pass
 
-def send_onvif_ptz(ip, profile, x, y, duration=0.4):
+def _send_onvif_stop(ip, profile):
+    url = f"http://{ip}:8899/onvif/PTZ"
+    # cam1 (.238) supports <tptz:Stop>
+    # cam2 (.11) rejects Stop (ActionNotSupported), requires ContinuousMove(0.0, 0.0)
+    if "238" in ip or "stream0_0" in profile:
+        soap_stop = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl">
+  <soap:Body>
+    <tptz:Stop>
+      <tptz:ProfileToken>{profile}</tptz:ProfileToken>
+      <tptz:PanTilt>true</tptz:PanTilt>
+    </tptz:Stop>
+  </soap:Body>
+</soap:Envelope>"""
+        headers = {
+            "Content-Type": "application/soap+xml; charset=utf-8; action=\"http://www.onvif.org/ver20/ptz/wsdl/Stop\""
+        }
+    else:
+        soap_stop = f"""<?xml version="1.0" encoding="utf-8"?>
+<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
+               xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"
+               xmlns:tt="http://www.onvif.org/ver10/schema">
+  <soap:Body>
+    <tptz:ContinuousMove>
+      <tptz:ProfileToken>{profile}</tptz:ProfileToken>
+      <tptz:Velocity>
+        <tt:PanTilt x="0.0" y="0.0"/>
+      </tptz:Velocity>
+    </tptz:ContinuousMove>
+  </soap:Body>
+</soap:Envelope>"""
+        headers = {
+            "Content-Type": "application/soap+xml; charset=utf-8; action=\"http://www.onvif.org/ver20/ptz/wsdl/ContinuousMove\""
+        }
+    try:
+        req = urllib.request.Request(url, data=soap_stop.encode("utf-8"), headers=headers)
+        with urllib.request.urlopen(req, timeout=3):
+            return True, "Stopped"
+    except Exception as e:
+        return False, str(e)
+
+def send_onvif_ptz(ip, profile, x, y, duration=0.8):
     """Sends ONVIF ContinuousMove and auto-stops after duration."""
+    if x == 0.0 and y == 0.0:
+        return _send_onvif_stop(ip, profile)
+
     url = f"http://{ip}:8899/onvif/PTZ"
     soap_move = f"""<?xml version="1.0" encoding="utf-8"?>
 <soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
@@ -170,25 +215,7 @@ def send_onvif_ptz(ip, profile, x, y, duration=0.4):
     if duration > 0:
         def stop_later():
             time.sleep(duration)
-            soap_stop = f"""<?xml version="1.0" encoding="utf-8"?>
-<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope"
-               xmlns:tptz="http://www.onvif.org/ver20/ptz/wsdl"
-               xmlns:tt="http://www.onvif.org/ver10/schema">
-  <soap:Body>
-    <tptz:ContinuousMove>
-      <tptz:ProfileToken>{profile}</tptz:ProfileToken>
-      <tptz:Velocity>
-        <tt:PanTilt x="0.0" y="0.0"/>
-      </tptz:Velocity>
-    </tptz:ContinuousMove>
-  </soap:Body>
-</soap:Envelope>"""
-            try:
-                r_stop = urllib.request.Request(url, data=soap_stop.encode("utf-8"), headers=headers)
-                with urllib.request.urlopen(r_stop, timeout=2):
-                    pass
-            except:
-                pass
+            _send_onvif_stop(ip, profile)
         threading.Thread(target=stop_later, daemon=True).start()
 
     return True, "Success"
@@ -278,8 +305,8 @@ def ptz_control(cam_id):
         return jsonify({"success": False, "error": "PTZ not supported on this camera"})
 
     direction = request.args.get("dir", "stop").lower()
-    speed = float(request.args.get("speed", 0.25))
-    duration = float(request.args.get("duration", 0.35))
+    speed = float(request.args.get("speed", 0.7))
+    duration = float(request.args.get("duration", 0.8))
 
     if cam.get("type") == "yi_p2p":
         # Proxy PTZ command to P2P bridge
@@ -1231,7 +1258,9 @@ HTML_TEMPLATE = """
 
         // PTZ and Streams
         function movePTZ(cam_id, direction) {
-            fetch(`/api/ptz/${cam_id}?dir=${direction}&speed=0.25&duration=0.35`)
+            const speed = 0.7;
+            const duration = direction === 'stop' ? 0.0 : 0.8;
+            fetch(`/api/ptz/${cam_id}?dir=${direction}&speed=${speed}&duration=${duration}`)
                 .then(res => res.json())
                 .then(data => {
                     if(!data.success) showToast(data.error || "PTZ Error", "error");
@@ -1365,7 +1394,7 @@ HTML_TEMPLATE = """
                             const badge = card.querySelector('.badge');
                             if (badge) {
                                 if (info.online) {
-                                    badge.textContent = `ONLINE (${info.fps.toFixed(1)} FPS)`;
+                                    badge.textContent = info.fps > 0 ? `ONLINE (${info.fps.toFixed(1)} FPS)` : 'CONNECTED (P2P)';
                                     badge.style.color = 'var(--success)';
                                     badge.style.borderColor = 'rgba(34, 197, 94, 0.3)';
                                 } else {

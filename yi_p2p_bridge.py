@@ -32,6 +32,8 @@ cdll.PPPP_Initialize.argtypes = [ctypes.c_char_p, ctypes.c_int]
 cdll.PPPP_Initialize.restype = ctypes.c_int
 cdll.PPPP_WakeUp_And_Connect.argtypes = [ctypes.c_char_p, ctypes.c_byte, ctypes.c_int, ctypes.c_char_p, ctypes.c_char_p]
 cdll.PPPP_WakeUp_And_Connect.restype = ctypes.c_int
+cdll.PPPP_Check.argtypes = [ctypes.c_int, ctypes.c_char_p]
+cdll.PPPP_Check.restype = ctypes.c_int
 cdll.PPPP_Read.argtypes = [ctypes.c_int, ctypes.c_byte, ctypes.c_char_p, ctypes.POINTER(ctypes.c_int), ctypes.c_int]
 cdll.PPPP_Read.restype = ctypes.c_int
 cdll.PPPP_Write.argtypes = [ctypes.c_int, ctypes.c_byte, ctypes.c_char_p, ctypes.c_int]
@@ -59,6 +61,7 @@ class YiCameraStreamer:
         self.fps = 0.0
         self.last_frame_time = 0
         self.sid = -1
+        self.cmd_seq = 1
         self.auth_bytes = None
         self.cond = threading.Condition()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
@@ -69,6 +72,7 @@ class YiCameraStreamer:
         aes_key = AES_KEY()
         crypto.AES_set_decrypt_key((self.pwd + "0").encode('ascii'), 128, ctypes.byref(aes_key))
         dec_buf = ctypes.create_string_buffer(16)
+        st_buf = ctypes.create_string_buffer(256)
 
         while self.running:
             self.online = False
@@ -96,6 +100,13 @@ class YiCameraStreamer:
                 time.sleep(cooldown)
                 continue
 
+            # Wait for PPPP session ready
+            for _ in range(15):
+                chk = cdll.PPPP_Check(sid, st_buf)
+                if chk == 0:
+                    break
+                time.sleep(0.2)
+
             print(f"[{self.cam_id}] Session established (SID={sid}). Starting video...")
             self.sid = sid
 
@@ -109,18 +120,13 @@ class YiCameraStreamer:
             auth_bytes = auth_str.encode('ascii').ljust(32, b'\x00')
             self.auth_bytes = auth_bytes
 
-            payload = bytes([1, 1, 1, 0])
-            hdr = struct.pack('>BBHI', 1, 3, 0, 40 + len(payload))
-            cmd_hdr = struct.pack('>HHHH', 9029, 1, 0, len(payload)) + auth_bytes
-            full_packet = hdr + cmd_hdr + payload
-            cdll.PPPP_Write(sid, ctypes.c_byte(0), full_packet, len(full_packet))
-
             ffmpeg_cmd = [
                 FFMPEG_PATH,
                 '-y',
                 '-loglevel', 'error',
                 '-fflags', 'nobuffer',
                 '-flags', 'low_delay',
+                '-tune', 'zerolatency',
                 '-probesize', '32',
                 '-analyzeduration', '0',
                 '-f', 'h264',
@@ -222,12 +228,20 @@ class YiCameraStreamer:
             ch2_t.start()
             ch3_t.start()
 
+            # Request video stream on Channel 0
+            payload = bytes([1, 1, 1, 0])
+            hdr = struct.pack('>BBHI', 1, 3, 0, 40 + len(payload))
+            cmd_hdr = struct.pack('>HHHH', 9029, 1, 0, len(payload)) + auth_bytes
+            full_packet = hdr + cmd_hdr + payload
+            cdll.PPPP_Write(sid, ctypes.c_byte(0), full_packet, len(full_packet))
+
             try:
                 while self.running and session_active.is_set():
-                    if time.time() - last_frame_rx[0] > 12.0:
-                        print(f"[{self.cam_id}] Stream stalled. Reconnecting...")
+                    chk = cdll.PPPP_Check(sid, st_buf)
+                    if chk < 0:
+                        print(f"[{self.cam_id}] PPPP_Check failed ({chk}). Reconnecting...")
                         break
-                    time.sleep(0.2)
+                    time.sleep(3.0)
             except Exception as e:
                 print(f"[{self.cam_id}] Exception in session monitor: {e}")
             finally:
@@ -247,28 +261,37 @@ class YiCameraStreamer:
     def send_ptz(self, direction, speed=50):
         """Send PTZ motor command via P2P channel 0.
         
-        Uses command 9030 (motor control) with direction payload.
-        Direction mapping: up=0, down=1, left=2, right=3, stop=4
-        Also tries direction byte values 1-4 for up/down/left/right (variant B).
+        Reverse-engineered from YIIOTHomePCClientIntl.exe (PBaseImpl::ctrlPTZ / stopPTZ):
+        - 0x4012 (16402): Motor move, 8-byte payload: struct.pack('<II', direction, speed)
+          where 1=UP, 2=DOWN, 3=LEFT, 4=RIGHT.
+        - 0x4013 (16403): Motor stop, 0-byte payload.
         """
         if self.sid < 0 or not self.auth_bytes:
             return False, "Camera not connected"
         
-        dir_map_a = {"up": 0, "down": 1, "left": 2, "right": 3, "stop": 4}
-        dir_map_b = {"up": 1, "down": 2, "left": 3, "right": 4, "stop": 0}
+        dir_map = {"up": 1, "down": 2, "left": 3, "right": 4}
         
-        dir_val = dir_map_a.get(direction)
-        if dir_val is None:
+        if direction == "stop":
+            cmd_code = 0x4013
+            payload = b""
+        elif direction in dir_map:
+            cmd_code = 0x4012
+            dir_val = dir_map[direction]
+            if 0 < speed <= 1.0:
+                speed_val = int(speed * 100)
+            else:
+                speed_val = max(0, min(int(speed), 100)) if speed > 0 else 50
+            payload = struct.pack('<II', dir_val, speed_val)
+        else:
             return False, f"Unknown direction: {direction}"
         
-        # Try command 9030 with 4-byte payload: [direction, speed, 0, 0]
-        payload = struct.pack('>BBBB', dir_val, min(speed, 255), 0, 0)
         hdr = struct.pack('>BBHI', 1, 3, 0, 40 + len(payload))
-        cmd_hdr = struct.pack('>HHHH', 9030, 1, 0, len(payload)) + self.auth_bytes
+        self.cmd_seq = getattr(self, "cmd_seq", 1) + 1
+        cmd_hdr = struct.pack('>HHHH', cmd_code, self.cmd_seq, 0, len(payload)) + self.auth_bytes
         packet = hdr + cmd_hdr + payload
         ret = cdll.PPPP_Write(self.sid, ctypes.c_byte(0), packet, len(packet))
         
-        print(f"[{self.cam_id}] PTZ {direction} cmd=9030 payload={payload.hex()} => ret={ret}")
+        print(f"[{self.cam_id}] PTZ {direction} cmd=0x{cmd_code:04x} payload={payload.hex()} => ret={ret}")
         return ret >= 0, f"PTZ {direction} sent (ret={ret})"
 
 CAMERA_MANAGERS = {}
@@ -293,7 +316,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             for cid, mgr in CAMERA_MANAGERS.items():
                 st[cid] = {
                     "name": mgr.name,
-                    "online": mgr.online,
+                    "online": mgr.online or (mgr.sid >= 0),
+                    "connected": (mgr.sid >= 0),
                     "fps": mgr.fps,
                     "frames": mgr.frame_count,
                     "last_frame_age": round(time.time() - mgr.last_frame_time, 2) if mgr.last_frame_time > 0 else 999
@@ -336,12 +360,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             parsed = urlparse(self.path)
             params = parse_qs(parsed.query)
             direction = params.get("dir", ["stop"])[0].lower()
-            speed = int(float(params.get("speed", ["50"])[0]))
+            speed = float(params.get("speed", ["50"])[0])
             
             success, msg = mgr.send_ptz(direction, speed)
             
             # Auto-stop after duration
-            duration = float(params.get("duration", ["0.35"])[0])
+            duration = float(params.get("duration", ["0.8"])[0])
             if direction != "stop" and duration > 0:
                 def auto_stop():
                     time.sleep(duration)
