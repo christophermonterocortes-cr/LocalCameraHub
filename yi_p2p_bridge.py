@@ -64,21 +64,20 @@ class YiCameraStreamer:
         self.cmd_seq = 1
         self.auth_bytes = None
         self.cond = threading.Condition()
+        self.p2p_write_lock = threading.Lock()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
 
     def _run_loop(self):
-        buf = ctypes.create_string_buffer(1048576)
         aes_key = AES_KEY()
         crypto.AES_set_decrypt_key((self.pwd + "0").encode('ascii'), 128, ctypes.byref(aes_key))
-        dec_buf = ctypes.create_string_buffer(16)
         st_buf = ctypes.create_string_buffer(256)
 
         while self.running:
             self.online = False
             sid = -1
             print(f"[{self.cam_id}] Connecting to {self.name} ({self.uid})...")
-            for attempt in range(5):
+            for attempt in range(8):
                 if not self.running:
                     return
                 sid = cdll.PPPP_WakeUp_And_Connect(
@@ -90,13 +89,13 @@ class YiCameraStreamer:
                 )
                 if sid >= 0:
                     break
-                wait_time = 8 if sid == -3006 else 3
+                wait_time = 5 if sid == -3006 else 2
                 print(f"[{self.cam_id}] Connect attempt {attempt+1} got sid {sid}, retrying in {wait_time}s...")
                 time.sleep(wait_time)
 
             if sid < 0:
-                cooldown = 12 if sid == -3006 else 5
-                print(f"[{self.cam_id}] Connection failed. Retrying in {cooldown}s...")
+                cooldown = 8 if sid == -3006 else 4
+                print(f"[{self.cam_id}] Connection failed ({sid}). Retrying in {cooldown}s...")
                 time.sleep(cooldown)
                 continue
 
@@ -105,7 +104,7 @@ class YiCameraStreamer:
                 chk = cdll.PPPP_Check(sid, st_buf)
                 if chk == 0:
                     break
-                time.sleep(0.2)
+                time.sleep(0.3)
 
             print(f"[{self.cam_id}] Session established (SID={sid}). Starting video...")
             self.sid = sid
@@ -123,32 +122,40 @@ class YiCameraStreamer:
             ffmpeg_cmd = [
                 FFMPEG_PATH,
                 '-y',
-                '-loglevel', 'error',
+                '-loglevel', 'warning',
                 '-fflags', 'nobuffer',
                 '-flags', 'low_delay',
-                '-tune', 'zerolatency',
-                '-probesize', '32',
-                '-analyzeduration', '0',
                 '-f', 'h264',
                 '-i', 'pipe:0',
-                '-f', 'image2pipe',
-                '-vcodec', 'mjpeg',
+                '-pix_fmt', 'yuvj420p',
+                '-f', 'mjpeg',
                 '-q:v', '5',
                 'pipe:1'
             ]
             try:
-                proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                proc = subprocess.Popen(
+                    ffmpeg_cmd,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL
+                )
             except Exception as e:
                 print(f"[{self.cam_id}] Failed to start FFmpeg: {e}")
                 cdll.PPPP_Close(sid)
                 time.sleep(3)
                 continue
 
+            session_active = threading.Event()
+            session_active.set()
+            ffmpeg_lock = threading.Lock()
+            got_first_keyframe = threading.Event()
+            last_frame_rx = [time.time()]
+
             def ffmpeg_reader():
                 f_buf = b''
                 last_fps_calc = time.time()
                 frames_in_period = 0
-                while self.running and proc.poll() is None:
+                while self.running and session_active.is_set() and proc.poll() is None:
                     try:
                         chunk = proc.stdout.read(4096)
                         if not chunk:
@@ -157,7 +164,8 @@ class YiCameraStreamer:
                         while True:
                             s = f_buf.find(b'\xff\xd8')
                             if s == -1:
-                                f_buf = b''
+                                if len(f_buf) > 4:
+                                    f_buf = f_buf[-4:]
                                 break
                             e = f_buf.find(b'\xff\xd9', s + 2)
                             if e == -1:
@@ -179,21 +187,22 @@ class YiCameraStreamer:
                                 self.fps = round(frames_in_period / (now - last_fps_calc), 1)
                                 frames_in_period = 0
                                 last_fps_calc = now
-                    except Exception:
+                    except Exception as e:
+                        print(f"[{self.cam_id}] FFmpeg reader exception: {e}")
                         break
 
             reader_thread = threading.Thread(target=ffmpeg_reader, daemon=True)
             reader_thread.start()
 
-            ffmpeg_lock = threading.Lock()
-            session_active = threading.Event()
-            session_active.set()
-            last_frame_rx = [time.time()]
-
             def channel_reader(ch_num):
                 ch_buf = ctypes.create_string_buffer(1048576)
                 ch_dec = ctypes.create_string_buffer(16)
                 while self.running and session_active.is_set():
+                    # Wait for I-frame before writing P-frames to FFmpeg
+                    if ch_num == 3 and not got_first_keyframe.is_set():
+                        time.sleep(0.04)
+                        continue
+
                     hdr_len = ctypes.c_int(8)
                     ret = cdll.PPPP_Read(sid, ctypes.c_byte(ch_num), ch_buf, ctypes.byref(hdr_len), 1500)
                     if ret >= 0 and hdr_len.value >= 8:
@@ -210,16 +219,21 @@ class YiCameraStreamer:
                                     raw_frame[44:60] = ch_dec.raw
                                 
                                 h264_nal = bytes(raw_frame[24:])
+                                if ch_num == 2:
+                                    got_first_keyframe.set()
+
                                 try:
                                     with ffmpeg_lock:
                                         proc.stdin.write(h264_nal)
                                         proc.stdin.flush()
                                     last_frame_rx[0] = time.time()
-                                except (BrokenPipeError, OSError):
+                                except (BrokenPipeError, OSError) as e:
+                                    print(f"[{self.cam_id}] Stdin write broken: {e}")
                                     session_active.clear()
                                     break
                     elif ret < 0 and ret != -3003:
-                        if ret in (-3012, -3006, -3001):
+                        if ret in (-3014, -3012, -3006, -3001):
+                            print(f"[{self.cam_id}] Ch{ch_num} connection broken ({ret})")
                             session_active.clear()
                             break
 
@@ -233,7 +247,8 @@ class YiCameraStreamer:
             hdr = struct.pack('>BBHI', 1, 3, 0, 40 + len(payload))
             cmd_hdr = struct.pack('>HHHH', 9029, 1, 0, len(payload)) + auth_bytes
             full_packet = hdr + cmd_hdr + payload
-            cdll.PPPP_Write(sid, ctypes.c_byte(0), full_packet, len(full_packet))
+            with self.p2p_write_lock:
+                cdll.PPPP_Write(sid, ctypes.c_byte(0), full_packet, len(full_packet))
 
             try:
                 while self.running and session_active.is_set():
@@ -241,7 +256,10 @@ class YiCameraStreamer:
                     if chk < 0:
                         print(f"[{self.cam_id}] PPPP_Check failed ({chk}). Reconnecting...")
                         break
-                    time.sleep(3.0)
+                    if got_first_keyframe.is_set() and (time.time() - last_frame_rx[0] > 12.0):
+                        print(f"[{self.cam_id}] Frame timeout (>12s). Reconnecting...")
+                        break
+                    time.sleep(2.0)
             except Exception as e:
                 print(f"[{self.cam_id}] Exception in session monitor: {e}")
             finally:
@@ -255,8 +273,8 @@ class YiCameraStreamer:
                 except:
                     pass
                 cdll.PPPP_Close(sid)
-                print(f"[{self.cam_id}] Session closed. Waiting 2s before retry...")
-                time.sleep(2)
+                print(f"[{self.cam_id}] Session closed. Waiting 3s before retry...")
+                time.sleep(3)
 
     def send_ptz(self, direction, speed=50):
         """Send PTZ motor command via P2P channel 0.
@@ -289,7 +307,9 @@ class YiCameraStreamer:
         self.cmd_seq = getattr(self, "cmd_seq", 1) + 1
         cmd_hdr = struct.pack('>HHHH', cmd_code, self.cmd_seq, 0, len(payload)) + self.auth_bytes
         packet = hdr + cmd_hdr + payload
-        ret = cdll.PPPP_Write(self.sid, ctypes.c_byte(0), packet, len(packet))
+        
+        with self.p2p_write_lock:
+            ret = cdll.PPPP_Write(self.sid, ctypes.c_byte(0), packet, len(packet))
         
         print(f"[{self.cam_id}] PTZ {direction} cmd=0x{cmd_code:04x} payload={payload.hex()} => ret={ret}")
         return ret >= 0, f"PTZ {direction} sent (ret={ret})"
@@ -316,7 +336,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             for cid, mgr in CAMERA_MANAGERS.items():
                 st[cid] = {
                     "name": mgr.name,
-                    "online": mgr.online or (mgr.sid >= 0),
+                    "online": mgr.online,
                     "connected": (mgr.sid >= 0),
                     "fps": mgr.fps,
                     "frames": mgr.frame_count,
@@ -355,16 +375,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
 
         if action == "ptz":
-            # Parse query string for direction
-            from urllib.parse import urlparse, parse_qs
-            parsed = urlparse(self.path)
-            params = parse_qs(parsed.query)
+            from urllib.parse import parse_qs
+            params = parse_qs(parsed_url.query)
             direction = params.get("dir", ["stop"])[0].lower()
             speed = float(params.get("speed", ["50"])[0])
             
             success, msg = mgr.send_ptz(direction, speed)
             
-            # Auto-stop after duration
             duration = float(params.get("duration", ["0.8"])[0])
             if direction != "stop" and duration > 0:
                 def auto_stop():
@@ -403,7 +420,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     frame = None
                     with mgr.cond:
                         if mgr.frame_count == last_sent_count or not mgr.latest_frame:
-                            mgr.cond.wait(timeout=1.0)
+                            mgr.cond.wait(timeout=0.5)
                         frame = mgr.latest_frame
                         last_sent_count = mgr.frame_count
 
