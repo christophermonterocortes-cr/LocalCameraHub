@@ -83,11 +83,15 @@ def generate_mjpeg(rtsp_url):
     cmd = [
         "ffmpeg",
         "-rtsp_transport", "tcp",
+        "-fflags", "nobuffer",
+        "-flags", "low_delay",
+        "-analyzeduration", "1000000",
+        "-probesize", "1000000",
         "-i", rtsp_url,
         "-f", "image2pipe",
         "-pix_fmt", "yuvj420p",
         "-vcodec", "mjpeg",
-        "-q:v", "5",
+        "-q:v", "6",
         "-r", "15",
         "-"
     ]
@@ -181,6 +185,7 @@ def index():
     return render_template_string(HTML_TEMPLATE, cameras=CAMERAS)
 
 @app.route("/stream/<cam_id>")
+@app.route("/video_feed/<cam_id>")
 def stream(cam_id):
     cam = CAMERAS.get(cam_id)
     if not cam:
@@ -1004,9 +1009,9 @@ HTML_TEMPLATE = """
                 <div class="cam-video-wrapper">
                     <div class="skeleton-loader" id="loader-{{ cam_id }}">
                         <svg class="icon" viewBox="0 0 24 24" style="width:32px;height:32px;animation: pulse 2s infinite;"><path d="M15.6 11.6L22 7v10l-6.4-4.5v-1zM4 5h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7c0-1.1.9-2 2-2z"></path></svg>
-                        <span>Connecting feed...</span>
+                        <span id="loader-txt-{{ cam_id }}">Connecting feed...</span>
                     </div>
-                    <img src="/video_feed/{{ cam_id }}" onload="document.getElementById('loader-{{ cam_id }}').style.display='none'" onerror="this.src='data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100%25' height='100%25' viewBox='0 0 24 24' fill='none' stroke='%23ef4444' stroke-width='1' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15.6 11.6L22 7v10l-6.4-4.5v-1zM4 5h9a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V7c0-1.1.9-2 2-2z'/%3E%3Cline x1='2' y1='2' x2='22' y2='22'/%3E%3C/svg%3E'; document.getElementById('loader-{{ cam_id }}').style.display='none'" alt="Feed {{ cam.name }}">
+                    <img src="/stream/{{ cam_id }}" id="feed-{{ cam_id }}" onload="onFeedLoaded('{{ cam_id }}')" onerror="onFeedError('{{ cam_id }}')" alt="Feed {{ cam.name }}">
                 </div>
 
                 <div class="cam-footer">
@@ -1166,22 +1171,43 @@ HTML_TEMPLATE = """
             }, 3000);
         }
 
+        // Feed Lifecycle & Auto-Reconnect
+        function onFeedLoaded(cam_id) {
+            const loader = document.getElementById('loader-' + cam_id);
+            if (loader) loader.style.display = 'none';
+        }
+
+        function onFeedError(cam_id) {
+            const loader = document.getElementById('loader-' + cam_id);
+            const txt = document.getElementById('loader-txt-' + cam_id);
+            if (loader) {
+                loader.style.display = 'flex';
+                if (txt) txt.textContent = 'Connecting...';
+            }
+            setTimeout(() => {
+                const img = document.getElementById('feed-' + cam_id);
+                if (img) {
+                    img.src = '/stream/' + cam_id + '?t=' + Date.now();
+                }
+            }, 3000);
+        }
+
         // PTZ and Streams
         function movePTZ(cam_id, direction) {
-            fetch(`/ptz/${cam_id}/${direction}`, {method: 'POST'})
+            fetch(`/api/ptz/${cam_id}?dir=${direction}&speed=0.25&duration=0.35`)
                 .then(res => res.json())
                 .then(data => {
                     if(!data.success) showToast(data.error || "PTZ Error", "error");
                 })
-                .catch(err => showToast("Network error: " + err, "error"));
+                .catch(err => showToast("PTZ Network error: " + err, "error"));
         }
 
         function launch(cam_id) {
-            fetch(`/launch/${cam_id}`, {method: 'POST'})
+            fetch(`/api/launch_player?cam_id=${cam_id}&player=vlc`)
                 .then(res => res.json())
                 .then(data => {
                     if(data.success) {
-                        showToast(`Opened ${cam_id} stream natively`, "success");
+                        showToast(`Opened ${cam_id} stream in VLC`, "success");
                     } else {
                         showToast(`Failed: ${data.error}`, "error");
                     }
@@ -1194,18 +1220,18 @@ HTML_TEMPLATE = """
             const el = document.getElementById(cardId);
             if (!document.fullscreenElement) {
                 if (el.requestFullscreen) {
-                    el.requestFullscreen().catch(err => showToast(`Error attempting to enable fullscreen: ${err.message}`, "error"));
-                } else if (el.webkitRequestFullscreen) { /* Safari */
+                    el.requestFullscreen().catch(err => showToast(`Fullscreen error: ${err.message}`, "error"));
+                } else if (el.webkitRequestFullscreen) {
                     el.webkitRequestFullscreen();
-                } else if (el.msRequestFullscreen) { /* IE11 */
+                } else if (el.msRequestFullscreen) {
                     el.msRequestFullscreen();
                 }
             } else {
                 if (document.exitFullscreen) {
                     document.exitFullscreen();
-                } else if (document.webkitExitFullscreen) { /* Safari */
+                } else if (document.webkitExitFullscreen) {
                     document.webkitExitFullscreen();
-                } else if (document.msExitFullscreen) { /* IE11 */
+                } else if (document.msExitFullscreen) {
                     document.msExitFullscreen();
                 }
             }
@@ -1213,34 +1239,33 @@ HTML_TEMPLATE = """
 
         // Recordings
         function loadRecordings() {
-            const camSelect = document.getElementById("rec-cam-select").value;
-            const url = camSelect ? `/api/recordings?cam=${camSelect}` : `/api/recordings`;
-            
             const listContainer = document.getElementById("clips-list");
-            listContainer.innerHTML = '<div style="padding: 24px; text-align: center; color: var(--text-muted);">Loading...</div>';
+            listContainer.innerHTML = '<div style="padding: 24px; text-align: center; color: var(--text-muted);">Loading recordings...</div>';
             
-            fetch(url)
+            fetch('/api/records')
                 .then(res => res.json())
                 .then(data => {
-                    if(data.error) {
-                        listContainer.innerHTML = `<div style="padding: 24px; color: var(--danger);">${data.error}</div>`;
+                    if(!data.success) {
+                        listContainer.innerHTML = `<div style="padding: 24px; color: var(--danger);">${data.error || 'Failed to load'}</div>`;
                         return;
                     }
                     
-                    if(data.clips.length === 0) {
-                        listContainer.innerHTML = `<div style="padding: 24px; text-align: center; color: var(--text-muted);">No recordings found</div>`;
+                    if(!data.clips || data.clips.length === 0) {
+                        listContainer.innerHTML = `<div style="padding: 24px; text-align: center; color: var(--text-muted);">No recordings found on local drives</div>`;
                         return;
                     }
 
                     let html = '';
                     data.clips.forEach((clip, index) => {
+                        const playUrl = `/api/records/play?file=${encodeURIComponent(clip.path)}`;
+                        const safePath = clip.path.replace(/\\/g, '\\\\');
                         html += `
-                        <div class="clip-item" id="clip-${index}" onclick="selectClip('${clip.url}', '${clip.path}', ${index})">
+                        <div class="clip-item" id="clip-${index}" onclick="selectClip('${playUrl}', '${safePath}', ${index})">
                             <svg class="icon" viewBox="0 0 24 24" style="min-width: 24px;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
                             <div style="overflow: hidden;">
                                 <div style="font-weight: 500; font-size: 0.9rem; text-overflow: ellipsis; white-space: nowrap; overflow: hidden;">${clip.filename}</div>
                                 <div style="font-size: 0.75rem; color: var(--text-muted); margin-top: 2px;">
-                                    Size: ${(clip.size_bytes / (1024*1024)).toFixed(1)} MB
+                                    ${clip.size_mb} MB &bull; ${clip.date}
                                 </div>
                             </div>
                         </div>`;
@@ -1254,40 +1279,36 @@ HTML_TEMPLATE = """
         }
 
         function selectClip(url, path, index) {
-            // Update active state
             document.querySelectorAll('.clip-item').forEach(el => el.classList.remove('active'));
-            document.getElementById(`clip-${index}`).classList.add('active');
+            const item = document.getElementById(`clip-${index}`);
+            if (item) item.classList.add('active');
             
             selectedClipUrl = url;
             selectedClipPath = path;
-            document.getElementById("btn-vlc").disabled = false;
+            const btnVlc = document.getElementById("btn-vlc");
+            if (btnVlc) btnVlc.disabled = false;
             
-            // Play in web player if browser supports it
             const player = document.getElementById("web-player");
-            player.src = url;
-            player.play().catch(e => {
-                console.log("Browser couldn't auto-play this format", e);
-                showToast("Format might require VLC to play", "warning");
-            });
+            if (player) {
+                player.src = url;
+                player.play().catch(e => {
+                    showToast("Browser playback format unsupported; click 'Play in VLC'", "warning");
+                });
+            }
         }
 
         function openSelectedInVLC() {
             if(!selectedClipPath) return;
-            
-            fetch('/api/play_vlc', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({file_path: selectedClipPath})
-            })
-            .then(res => res.json())
-            .then(data => {
-                if(data.success) {
-                    showToast("Clip opened in VLC", "success");
-                } else {
-                    showToast("Failed to open VLC: " + data.error, "error");
-                }
-            })
-            .catch(err => showToast("Network error", "error"));
+            fetch(`/api/records/open_vlc?file=${encodeURIComponent(selectedClipPath)}`)
+                .then(res => res.json())
+                .then(data => {
+                    if(data.success) {
+                        showToast("Clip opened in VLC", "success");
+                    } else {
+                        showToast("Failed to open VLC: " + data.error, "error");
+                    }
+                })
+                .catch(err => showToast("Network error", "error"));
         }
 
         // Bridge Status Polling
@@ -1300,24 +1321,46 @@ HTML_TEMPLATE = """
                 .then(data => {
                     const dot = document.getElementById('bridge-dot');
                     const txt = document.getElementById('bridge-text');
-                    if(data.status === 'online') {
-                        dot.className = 'status-dot pulsing';
-                        txt.innerText = 'P2P Bridge Active';
+                    let anyOnline = false;
+                    for (const [camId, info] of Object.entries(data)) {
+                        const card = document.getElementById(`card-${camId}`);
+                        if (card) {
+                            const badge = card.querySelector('.badge');
+                            if (badge) {
+                                if (info.online) {
+                                    badge.textContent = `ONLINE (${info.fps.toFixed(1)} FPS)`;
+                                    badge.style.color = 'var(--success)';
+                                    badge.style.borderColor = 'rgba(34, 197, 94, 0.3)';
+                                } else {
+                                    badge.textContent = 'CONNECTING';
+                                    badge.style.color = 'var(--warning)';
+                                    badge.style.borderColor = 'rgba(245, 158, 11, 0.3)';
+                                }
+                            }
+                        }
+                        if (info.online) anyOnline = true;
+                    }
+                    if (anyOnline) {
+                        if (dot) dot.className = 'status-dot pulsing';
+                        if (txt) txt.innerText = 'P2P Bridge Active';
+                    } else if (Object.keys(data).length > 0) {
+                        if (dot) dot.className = 'status-dot';
+                        if (txt) txt.innerText = 'P2P Bridge Connecting...';
                     } else {
-                        dot.className = 'status-dot offline';
-                        txt.innerText = 'P2P Bridge Offline';
+                        if (dot) dot.className = 'status-dot offline';
+                        if (txt) txt.innerText = 'P2P Bridge Offline';
                     }
                 })
                 .catch(err => {
-                    // Fail silently or just update dot
                     const dot = document.getElementById('bridge-dot');
                     const txt = document.getElementById('bridge-text');
-                    dot.className = 'status-dot offline';
-                    txt.innerText = 'Bridge Unreachable';
+                    if (dot) dot.className = 'status-dot offline';
+                    if (txt) txt.innerText = 'Bridge Unreachable';
                 });
         }
         
         setInterval(checkBridgeStatus, 5000);
+        setTimeout(checkBridgeStatus, 1000);
         setTimeout(checkBridgeStatus, 1000); // Initial check
 
         // Keyboard Shortcuts

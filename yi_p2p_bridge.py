@@ -84,12 +84,14 @@ class YiCameraStreamer:
                 )
                 if sid >= 0:
                     break
-                print(f"[{self.cam_id}] Connect attempt {attempt+1} got sid {sid}, retrying in 2s...")
-                time.sleep(2)
+                wait_time = 8 if sid == -3006 else 3
+                print(f"[{self.cam_id}] Connect attempt {attempt+1} got sid {sid}, retrying in {wait_time}s...")
+                time.sleep(wait_time)
 
             if sid < 0:
-                print(f"[{self.cam_id}] Connection failed. Retrying in 5s...")
-                time.sleep(5)
+                cooldown = 12 if sid == -3006 else 5
+                print(f"[{self.cam_id}] Connection failed. Retrying in {cooldown}s...")
+                time.sleep(cooldown)
                 continue
 
             print(f"[{self.cam_id}] Session established (SID={sid}). Starting video...")
