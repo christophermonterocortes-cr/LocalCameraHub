@@ -1,4 +1,5 @@
 import os
+import socket
 import ctypes
 import json
 import time
@@ -45,6 +46,68 @@ cdll.PPPP_DeInitialize.restype = ctypes.c_int
 
 cdll.PPPP_Initialize(b'\x00', 12)
 
+class H264Sequencer:
+    """Reorders frames from Channel 2 (I-frames) and Channel 3 (P-frames) into strict numerical order."""
+    def __init__(self, on_frame_callback):
+        self.callback = on_frame_callback
+        self.buffer = {}
+        self.expected_seq = None
+        self.has_keyframe = False
+        self.lock = threading.Lock()
+        self.running = True
+        self.worker = threading.Thread(target=self._run, daemon=True)
+        self.worker.start()
+
+    def push(self, seq, is_key, data):
+        with self.lock:
+            now = time.time()
+            if not self.has_keyframe:
+                if not is_key:
+                    # Drop P-frames until first keyframe arrives
+                    return
+                self.has_keyframe = True
+                self.expected_seq = seq
+                self.buffer[seq] = (data, is_key, now)
+                return
+
+            diff = (seq - self.expected_seq) & 0xFFFF
+            if diff > 32768:
+                # Late / duplicate frame
+                return
+            if diff > 30:
+                # Big gap: fast forward
+                self.expected_seq = seq
+                self.buffer.clear()
+            self.buffer[seq] = (data, is_key, now)
+
+    def _run(self):
+        while self.running:
+            item = None
+            seq_to_send = None
+            with self.lock:
+                if self.expected_seq is not None:
+                    if self.expected_seq in self.buffer:
+                        seq_to_send = self.expected_seq
+                        item = self.buffer.pop(self.expected_seq)
+                        self.expected_seq = (self.expected_seq + 1) & 0xFFFF
+                    elif self.buffer:
+                        oldest_t = min(t for _, _, t in self.buffer.values())
+                        if time.time() - oldest_t > 0.35 or len(self.buffer) > 20:
+                            # Skip missing sequence(s) to maintain real-time edge without stalling
+                            min_seq = min(self.buffer.keys(), key=lambda s: (s - self.expected_seq) & 0xFFFF)
+                            self.expected_seq = min_seq
+                            seq_to_send = self.expected_seq
+                            item = self.buffer.pop(self.expected_seq)
+                            self.expected_seq = (self.expected_seq + 1) & 0xFFFF
+
+            if item:
+                self.callback(seq_to_send, item[1], item[0])
+            else:
+                time.sleep(0.003)
+
+    def stop(self):
+        self.running = False
+
 class YiCameraStreamer:
     def __init__(self, cam_id, config):
         self.cam_id = cam_id
@@ -67,6 +130,16 @@ class YiCameraStreamer:
         self.p2p_write_lock = threading.Lock()
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
+
+    def make_auth(self):
+        chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
+        nonce = "".join(random.choice(chars) for _ in range(15))
+        str_to_hash = f"user=xiaoyiuser&nonce={nonce}"
+        sig = base64.b64encode(hmac.new(self.pwd.encode('utf-8'), str_to_hash.encode('utf-8'), hashlib.sha1).digest()).decode('ascii')
+        if len(sig) > 15:
+            sig = sig[:15]
+        auth_str = f"{nonce},{sig}"
+        return auth_str.encode('ascii').ljust(32, b'\x00')
 
     def _run_loop(self):
         aes_key = AES_KEY()
@@ -108,15 +181,7 @@ class YiCameraStreamer:
 
             print(f"[{self.cam_id}] Session established (SID={sid}). Starting video...")
             self.sid = sid
-
-            chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-            nonce = "".join(random.choice(chars) for _ in range(15))
-            str_to_hash = f"user=xiaoyiuser&nonce={nonce}"
-            sig = base64.b64encode(hmac.new(self.pwd.encode('utf-8'), str_to_hash.encode('utf-8'), hashlib.sha1).digest()).decode('ascii')
-            if len(sig) > 15:
-                sig = sig[:15]
-            auth_str = f"{nonce},{sig}"
-            auth_bytes = auth_str.encode('ascii').ljust(32, b'\x00')
+            auth_bytes = self.make_auth()
             self.auth_bytes = auth_bytes
 
             ffmpeg_cmd = [
@@ -127,7 +192,7 @@ class YiCameraStreamer:
                 '-flags', 'low_delay',
                 '-f', 'h264',
                 '-i', 'pipe:0',
-                '-pix_fmt', 'yuvj420p',
+                '-pix_fmt', 'yuv420p',
                 '-f', 'mjpeg',
                 '-q:v', '5',
                 'pipe:1'
@@ -148,8 +213,19 @@ class YiCameraStreamer:
             session_active = threading.Event()
             session_active.set()
             ffmpeg_lock = threading.Lock()
-            got_first_keyframe = threading.Event()
             last_frame_rx = [time.time()]
+
+            def send_to_ffmpeg(seq, is_key, nal_data):
+                try:
+                    with ffmpeg_lock:
+                        proc.stdin.write(nal_data)
+                        proc.stdin.flush()
+                    last_frame_rx[0] = time.time()
+                except (BrokenPipeError, OSError) as e:
+                    print(f"[{self.cam_id}] Stdin write broken: {e}")
+                    session_active.clear()
+
+            sequencer = H264Sequencer(send_to_ffmpeg)
 
             def ffmpeg_reader():
                 f_buf = b''
@@ -178,6 +254,8 @@ class YiCameraStreamer:
                                 self.latest_frame = jpg
                                 self.frame_count += 1
                                 self.last_frame_time = time.time()
+                                if not self.online:
+                                    print(f"[{self.cam_id}] Stream live! First frame decoded successfully.")
                                 self.online = True
                                 self.cond.notify_all()
 
@@ -198,11 +276,6 @@ class YiCameraStreamer:
                 ch_buf = ctypes.create_string_buffer(1048576)
                 ch_dec = ctypes.create_string_buffer(16)
                 while self.running and session_active.is_set():
-                    # Wait for I-frame before writing P-frames to FFmpeg
-                    if ch_num == 3 and not got_first_keyframe.is_set():
-                        time.sleep(0.04)
-                        continue
-
                     hdr_len = ctypes.c_int(8)
                     ret = cdll.PPPP_Read(sid, ctypes.c_byte(ch_num), ch_buf, ctypes.byref(hdr_len), 1500)
                     if ret >= 0 and hdr_len.value >= 8:
@@ -218,19 +291,9 @@ class YiCameraStreamer:
                                     crypto.AES_ecb_encrypt(bytes(raw_frame[44:60]), ch_dec, ctypes.byref(aes_key), 0)
                                     raw_frame[44:60] = ch_dec.raw
                                 
+                                seq = struct.unpack_from('>H', raw_frame, 6)[0]
                                 h264_nal = bytes(raw_frame[24:])
-                                if ch_num == 2:
-                                    got_first_keyframe.set()
-
-                                try:
-                                    with ffmpeg_lock:
-                                        proc.stdin.write(h264_nal)
-                                        proc.stdin.flush()
-                                    last_frame_rx[0] = time.time()
-                                except (BrokenPipeError, OSError) as e:
-                                    print(f"[{self.cam_id}] Stdin write broken: {e}")
-                                    session_active.clear()
-                                    break
+                                sequencer.push(seq, ch_num == 2, h264_nal)
                     elif ret < 0 and ret != -3003:
                         if ret in (-3014, -3012, -3006, -3001):
                             print(f"[{self.cam_id}] Ch{ch_num} connection broken ({ret})")
@@ -242,6 +305,28 @@ class YiCameraStreamer:
             ch2_t.start()
             ch3_t.start()
 
+            def channel_0_reader():
+                c0_buf = ctypes.create_string_buffer(4096)
+                while self.running and session_active.is_set():
+                    hdr_len = ctypes.c_int(8)
+                    ret = cdll.PPPP_Read(sid, ctypes.c_byte(0), c0_buf, ctypes.byref(hdr_len), 1000)
+                    if ret >= 0 and hdr_len.value >= 8:
+                        body_len = struct.unpack_from('>I', c0_buf.raw, 4)[0]
+                        if 0 < body_len <= 4096:
+                            b_len = ctypes.c_int(body_len)
+                            ret2 = cdll.PPPP_Read(sid, ctypes.c_byte(0), c0_buf, ctypes.byref(b_len), 1000)
+                            if ret2 >= 0 and b_len.value >= 8:
+                                raw_bytes = bytes(c0_buf.raw[:b_len.value])
+                                r_cmd, r_resp, r_seq, r_ex = struct.unpack_from('>HHHH', raw_bytes, 0)
+                                r_status = struct.unpack_from('>i', raw_bytes, 8)[0] if len(raw_bytes) >= 12 else 0
+                                print(f"[{self.cam_id}] Ch0 RX req_cmd=0x{r_cmd:04x} resp_cmd=0x{r_resp:04x} seq={r_seq} status={r_status} len={len(raw_bytes)} hex={raw_bytes[:24].hex()}")
+                    elif ret < 0 and ret not in (-3003, -3004):
+                        if ret in (-3014, -3012, -3006, -3001):
+                            break
+
+            ch0_t = threading.Thread(target=channel_0_reader, daemon=True)
+            ch0_t.start()
+
             # Request video stream on Channel 0
             payload = bytes([1, 1, 1, 0])
             hdr = struct.pack('>BBHI', 1, 3, 0, 40 + len(payload))
@@ -250,13 +335,17 @@ class YiCameraStreamer:
             with self.p2p_write_lock:
                 cdll.PPPP_Write(sid, ctypes.c_byte(0), full_packet, len(full_packet))
 
+            stream_start_time = time.time()
             try:
                 while self.running and session_active.is_set():
                     chk = cdll.PPPP_Check(sid, st_buf)
                     if chk < 0:
                         print(f"[{self.cam_id}] PPPP_Check failed ({chk}). Reconnecting...")
                         break
-                    if got_first_keyframe.is_set() and (time.time() - last_frame_rx[0] > 12.0):
+                    if not sequencer.has_keyframe and (time.time() - stream_start_time > 15.0):
+                        print(f"[{self.cam_id}] Initial keyframe timeout (>15s). Reconnecting...")
+                        break
+                    if sequencer.has_keyframe and (time.time() - last_frame_rx[0] > 12.0):
                         print(f"[{self.cam_id}] Frame timeout (>12s). Reconnecting...")
                         break
                     time.sleep(2.0)
@@ -264,6 +353,7 @@ class YiCameraStreamer:
                 print(f"[{self.cam_id}] Exception in session monitor: {e}")
             finally:
                 session_active.clear()
+                sequencer.stop()
                 self.online = False
                 self.sid = -1
                 try:
@@ -276,15 +366,15 @@ class YiCameraStreamer:
                 print(f"[{self.cam_id}] Session closed. Waiting 3s before retry...")
                 time.sleep(3)
 
-    def send_ptz(self, direction, speed=50):
+    def send_ptz(self, direction, speed=0):
         """Send PTZ motor command via P2P channel 0.
         
-        Reverse-engineered from YIIOTHomePCClientIntl.exe (PBaseImpl::ctrlPTZ / stopPTZ):
-        - 0x4012 (16402): Motor move, 8-byte payload: struct.pack('<II', direction, speed)
-          where 1=UP, 2=DOWN, 3=LEFT, 4=RIGHT.
-        - 0x4013 (16403): Motor stop, 0-byte payload.
+        Uses 0x4012 (move) and 0x4013 (stop) — confirmed working with physical motor movement.
+        - 0x4012: 8-byte payload struct.pack('>II', direction, speed)
+          direction: 1=UP, 2=DOWN, 3=LEFT, 4=RIGHT. speed=0 for firmware default.
+        - 0x4013: empty payload (stop all motor movement)
         """
-        if self.sid < 0 or not self.auth_bytes:
+        if self.sid < 0:
             return False, "Camera not connected"
         
         dir_map = {"up": 1, "down": 2, "left": 3, "right": 4}
@@ -293,26 +383,24 @@ class YiCameraStreamer:
             cmd_code = 0x4013
             payload = b""
         elif direction in dir_map:
-            cmd_code = 0x4012
             dir_val = dir_map[direction]
-            if 0 < speed <= 1.0:
-                speed_val = int(speed * 100)
-            else:
-                speed_val = max(0, min(int(speed), 100)) if speed > 0 else 50
-            payload = struct.pack('<II', dir_val, speed_val)
+            speed_val = int(speed) if speed else 0
+            cmd_code = 0x4012
+            payload = struct.pack('>II', dir_val, speed_val)
         else:
             return False, f"Unknown direction: {direction}"
         
+        auth_bytes = self.make_auth()
         hdr = struct.pack('>BBHI', 1, 3, 0, 40 + len(payload))
         self.cmd_seq = getattr(self, "cmd_seq", 1) + 1
-        cmd_hdr = struct.pack('>HHHH', cmd_code, self.cmd_seq, 0, len(payload)) + self.auth_bytes
+        cmd_hdr = struct.pack('>HHHH', cmd_code, self.cmd_seq, 0, len(payload)) + auth_bytes
         packet = hdr + cmd_hdr + payload
         
         with self.p2p_write_lock:
             ret = cdll.PPPP_Write(self.sid, ctypes.c_byte(0), packet, len(packet))
         
-        print(f"[{self.cam_id}] PTZ {direction} cmd=0x{cmd_code:04x} payload={payload.hex()} => ret={ret}")
-        return ret >= 0, f"PTZ {direction} sent (ret={ret})"
+        print(f"[{self.cam_id}] PTZ {direction} cmd=0x{cmd_code:04x} seq={self.cmd_seq} payload={payload.hex()} => ret={ret}")
+        return ret >= 0, f"PTZ {direction} sent (cmd=0x{cmd_code:04x}, ret={ret})"
 
 CAMERA_MANAGERS = {}
 
@@ -378,7 +466,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             from urllib.parse import parse_qs
             params = parse_qs(parsed_url.query)
             direction = params.get("dir", ["stop"])[0].lower()
-            speed = float(params.get("speed", ["50"])[0])
+            speed = float(params.get("speed", ["0"])[0])
             
             success, msg = mgr.send_ptz(direction, speed)
             
@@ -406,6 +494,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
 
+            # Zero-latency TCP socket settings
+            try:
+                self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 65536)
+            except:
+                pass
+
             placeholder_frame = None
             if os.path.exists(PLACEHOLDER_PATH):
                 try:
@@ -420,7 +515,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     frame = None
                     with mgr.cond:
                         if mgr.frame_count == last_sent_count or not mgr.latest_frame:
-                            mgr.cond.wait(timeout=0.5)
+                            mgr.cond.wait(timeout=0.4)
                         frame = mgr.latest_frame
                         last_sent_count = mgr.frame_count
 

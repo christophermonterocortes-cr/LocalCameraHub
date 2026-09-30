@@ -21,7 +21,7 @@ def proxy_p2p_mjpeg(cam_id):
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             while True:
-                chunk = r.read(16384)
+                chunk = r.read(32768)
                 if not chunk:
                     break
                 yield chunk
@@ -181,7 +181,7 @@ def _send_onvif_stop(ip, profile):
     except Exception as e:
         return False, str(e)
 
-def send_onvif_ptz(ip, profile, x, y, duration=0.8):
+def send_onvif_ptz(ip, profile, x, y, duration=0.25):
     """Sends ONVIF ContinuousMove and auto-stops after duration."""
     if x == 0.0 and y == 0.0:
         return _send_onvif_stop(ip, profile)
@@ -234,7 +234,8 @@ def stream(cam_id):
     if cam.get("type") == "yi_p2p":
         resp = Response(
             proxy_p2p_mjpeg(cam_id),
-            mimetype="multipart/x-mixed-replace; boundary=frame"
+            mimetype="multipart/x-mixed-replace; boundary=frame",
+            direct_passthrough=True
         )
     else:
         ip = cam["ip"]
@@ -299,14 +300,18 @@ def bridge_status():
         return jsonify({"error": str(e)})
 
 @app.route("/api/ptz/<cam_id>")
-def ptz_control(cam_id):
+@app.route("/api/ptz/<cam_id>/<direction>")
+def ptz_control(cam_id, direction=None):
     cam = CAMERAS.get(cam_id)
     if not cam or not cam.get("has_ptz"):
         return jsonify({"success": False, "error": "PTZ not supported on this camera"})
 
-    direction = request.args.get("dir", "stop").lower()
-    speed = float(request.args.get("speed", 0.7))
-    duration = float(request.args.get("duration", 0.8))
+    if direction is None:
+        direction = request.args.get("dir", "stop").lower()
+    else:
+        direction = direction.lower()
+    speed = float(request.args.get("speed", 0.25))
+    duration = float(request.args.get("duration", 0.25))
 
     if cam.get("type") == "yi_p2p":
         # Proxy PTZ command to P2P bridge
@@ -576,6 +581,49 @@ HTML_TEMPLATE = """
             font-weight: 600;
         }
 
+        .sensitivity-control {
+            display: flex;
+            align-items: center;
+            background: rgba(15, 23, 42, 0.7);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius-sm);
+            padding: 3px 6px;
+            gap: 4px;
+        }
+
+        .sens-label {
+            font-size: 0.75rem;
+            color: var(--text-muted);
+            font-weight: 600;
+            margin-right: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .sens-btn {
+            background: transparent;
+            border: 1px solid transparent;
+            color: var(--text-muted);
+            font-size: 0.75rem;
+            font-weight: 500;
+            padding: 4px 8px;
+            border-radius: 6px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .sens-btn:hover {
+            color: var(--text-main);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .sens-btn.active {
+            color: var(--accent);
+            background: rgba(56, 189, 248, 0.12);
+            border-color: rgba(56, 189, 248, 0.3);
+            font-weight: 600;
+        }
+
         .bridge-status {
             display: flex;
             align-items: center;
@@ -779,6 +827,13 @@ HTML_TEMPLATE = """
         .ptz-btn svg {
             width: 16px;
             height: 16px;
+            pointer-events: none;
+        }
+
+        .ptz-btn:active, .ptz-btn.active-ptz {
+            color: var(--accent);
+            background: rgba(56, 189, 248, 0.25);
+            transform: scale(0.9);
         }
 
         .ptz-up { top: 0; left: 30px; }
@@ -1038,7 +1093,15 @@ HTML_TEMPLATE = """
 
     <main class="main-content">
         <div class="top-bar">
-            <div class="top-title" id="page-title">Live Overview</div>
+            <div style="display: flex; align-items: center; gap: 16px; flex-wrap: wrap;">
+                <div class="top-title" id="page-title">Live Overview</div>
+                <div class="sensitivity-control" title="PTZ Step Sensitivity">
+                    <span class="sens-label">PTZ Step:</span>
+                    <button type="button" class="sens-btn active" id="sens-micro" onclick="setSensitivity('micro')">Micro (Nudge)</button>
+                    <button type="button" class="sens-btn" id="sens-normal" onclick="setSensitivity('normal')">Normal</button>
+                    <button type="button" class="sens-btn" id="sens-sweep" onclick="setSensitivity('sweep')">Sweep</button>
+                </div>
+            </div>
             <div class="bridge-status" id="bridge-status" title="P2P Bridge Status">
                 <div class="status-dot pulsing" id="bridge-dot"></div>
                 <span id="bridge-text">Checking P2P Bridge...</span>
@@ -1256,16 +1319,78 @@ HTML_TEMPLATE = """
             }, 3000);
         }
 
+        let ptzSensitivity = localStorage.getItem('ptzSensitivity') || 'micro';
+
+        function setSensitivity(level) {
+            ptzSensitivity = level;
+            try { localStorage.setItem('ptzSensitivity', level); } catch(e) {}
+            document.querySelectorAll('.sens-btn').forEach(btn => btn.classList.remove('active'));
+            const activeBtn = document.getElementById('sens-' + level);
+            if (activeBtn) activeBtn.classList.add('active');
+            showToast('PTZ Step: ' + level.toUpperCase(), 'info');
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const activeBtn = document.getElementById('sens-' + ptzSensitivity);
+            if (activeBtn) {
+                document.querySelectorAll('.sens-btn').forEach(btn => btn.classList.remove('active'));
+                activeBtn.classList.add('active');
+            }
+        });
+
         // PTZ and Streams
         function movePTZ(cam_id, direction) {
-            const speed = 0.7;
-            const duration = direction === 'stop' ? 0.0 : 0.8;
-            fetch(`/api/ptz/${cam_id}?dir=${direction}&speed=${speed}&duration=${duration}`)
+            const isP2P = (cam_id === 'cam3' || cam_id === 'cam4');
+            let speed, duration;
+
+            if (direction === 'stop') {
+                speed = 0.0;
+                duration = 0.0;
+            } else if (isP2P) {
+                // P2P cameras (cam3, cam4): speed=0 (calibrated default), duration controls the step
+                speed = 0;
+                if (ptzSensitivity === 'micro') {
+                    duration = 0.50;
+                } else if (ptzSensitivity === 'sweep') {
+                    duration = 1.60;
+                } else {
+                    duration = 0.90;
+                }
+            } else {
+                // Calibrated ONVIF sensitivity (cam1, cam2): micro-nudge by default
+                if (ptzSensitivity === 'micro') {
+                    speed = 0.18;
+                    duration = 0.20;
+                } else if (ptzSensitivity === 'sweep') {
+                    speed = 0.50;
+                    duration = 0.60;
+                } else {
+                    speed = 0.25;
+                    duration = 0.30;
+                }
+            }
+
+            // Highlight clicked button
+            const card = document.getElementById('card-' + cam_id);
+            if (card) {
+                const btn = card.querySelector('.ptz-' + direction);
+                if (btn) {
+                    btn.classList.add('active-ptz');
+                    setTimeout(() => btn.classList.remove('active-ptz'), 400);
+                }
+            }
+
+            fetch('/api/ptz/' + cam_id + '?dir=' + direction + '&speed=' + speed + '&duration=' + duration)
                 .then(res => res.json())
                 .then(data => {
-                    if(!data.success) showToast(data.error || "PTZ Error", "error");
+                    if (data.success) {
+                        const dirLabel = direction.toUpperCase();
+                        showToast(cam_id.toUpperCase() + ': ' + dirLabel, 'success');
+                    } else {
+                        showToast(data.error || 'PTZ Error', 'error');
+                    }
                 })
-                .catch(err => showToast("PTZ Network error: " + err, "error"));
+                .catch(err => showToast('PTZ Network error: ' + err, 'error'));
         }
 
         function launch(cam_id) {
@@ -1304,6 +1429,8 @@ HTML_TEMPLATE = """
         }
 
         // Recordings
+        let loadedClips = [];
+
         function loadRecordings() {
             const listContainer = document.getElementById("clips-list");
             listContainer.innerHTML = '<div style="padding: 24px; text-align: center; color: var(--text-muted);">Loading recordings...</div>';
@@ -1321,12 +1448,11 @@ HTML_TEMPLATE = """
                         return;
                     }
 
+                    loadedClips = data.clips;
                     let html = '';
                     data.clips.forEach((clip, index) => {
-                        const playUrl = `/api/records/play?file=${encodeURIComponent(clip.path)}`;
-                        const safePath = clip.path.replace(/\\/g, '\\\\');
                         html += `
-                        <div class="clip-item" id="clip-${index}" onclick="selectClip('${playUrl}', '${safePath}', ${index})">
+                        <div class="clip-item" id="clip-${index}" onclick="selectClip(${index})">
                             <svg class="icon" viewBox="0 0 24 24" style="min-width: 24px;"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
                             <div style="overflow: hidden;">
                                 <div style="font-weight: 500; font-size: 0.9rem; text-overflow: ellipsis; white-space: nowrap; overflow: hidden;">${clip.filename}</div>
@@ -1344,19 +1470,21 @@ HTML_TEMPLATE = """
                 });
         }
 
-        function selectClip(url, path, index) {
+        function selectClip(index) {
+            const clip = loadedClips[index];
+            if (!clip) return;
             document.querySelectorAll('.clip-item').forEach(el => el.classList.remove('active'));
             const item = document.getElementById(`clip-${index}`);
             if (item) item.classList.add('active');
             
-            selectedClipUrl = url;
-            selectedClipPath = path;
+            selectedClipUrl = `/api/records/play?file=${encodeURIComponent(clip.path)}`;
+            selectedClipPath = clip.path;
             const btnVlc = document.getElementById("btn-vlc");
             if (btnVlc) btnVlc.disabled = false;
             
             const player = document.getElementById("web-player");
             if (player) {
-                player.src = url;
+                player.src = selectedClipUrl;
                 player.play().catch(e => {
                     showToast("Browser playback format unsupported; click 'Play in VLC'", "warning");
                 });
@@ -1469,12 +1597,16 @@ HTML_TEMPLATE = """
             }
         });
         
-        document.addEventListener('keyup', function(e) {
-            if(!hoveredCam) return;
-            const arrows = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
-            if(arrows.includes(e.key)) {
-                e.preventDefault();
-                movePTZ(hoveredCam, 'stop');
+        // Auto-resync video streams on tab visibility to eliminate lag
+        document.addEventListener('visibilitychange', () => {
+            if (document.visibilityState === 'visible') {
+                ['cam1', 'cam2', 'cam3', 'cam4'].forEach(id => {
+                    const img = document.getElementById('feed-' + id);
+                    if (img) {
+                        const base = img.src.split('?')[0];
+                        img.src = base + '?t=' + Date.now();
+                    }
+                });
             }
         });
 
