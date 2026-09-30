@@ -12,6 +12,7 @@ from flask import Flask, Response, render_template_string, jsonify, request, sen
 app = Flask(__name__)
 
 P2P_BRIDGE_URL = "http://127.0.0.1:8084"
+PLACEHOLDER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "placeholder.jpg")
 
 def proxy_p2p_mjpeg(cam_id):
     """Proxies multipart MJPEG stream from the native Windows P2P bridge."""
@@ -80,6 +81,18 @@ CAMERAS = {
 
 def generate_mjpeg(rtsp_url):
     """Pipes RTSP to multipart MJPEG stream for in-browser playback."""
+    if os.path.exists(PLACEHOLDER_PATH):
+        try:
+            with open(PLACEHOLDER_PATH, "rb") as f:
+                p_jpg = f.read()
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                b"Content-Length: " + str(len(p_jpg)).encode() + b"\r\n\r\n" + p_jpg + b"\r\n\r\n"
+            )
+        except:
+            pass
+
     cmd = [
         "ffmpeg",
         "-rtsp_transport", "tcp",
@@ -192,24 +205,30 @@ def stream(cam_id):
         return "Camera not found", 404
     
     if cam.get("type") == "yi_p2p":
-        return Response(
+        resp = Response(
             proxy_p2p_mjpeg(cam_id),
             mimetype="multipart/x-mixed-replace; boundary=frame"
         )
-    
-    ip = cam["ip"]
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(0.6)
-    res = s.connect_ex((ip, 554))
-    s.close()
+    else:
+        ip = cam["ip"]
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(0.6)
+        res = s.connect_ex((ip, 554))
+        s.close()
 
-    if res != 0:
-        return Response("RTSP stream is not currently available for this camera.", status=503)
+        if res != 0:
+            return Response("RTSP stream is not currently available for this camera.", status=503)
 
-    return Response(
-        generate_mjpeg(cam["rtsp"]),
-        mimetype="multipart/x-mixed-replace; boundary=frame"
-    )
+        resp = Response(
+            generate_mjpeg(cam["rtsp"]),
+            mimetype="multipart/x-mixed-replace; boundary=frame"
+        )
+
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate, max-age=0"
+    resp.headers["Pragma"] = "no-cache"
+    resp.headers["Expires"] = "0"
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    return resp
 
 @app.route("/snapshot/<cam_id>")
 def snapshot(cam_id):
@@ -626,7 +645,8 @@ HTML_TEMPLATE = """
             position: relative;
             width: 100%;
             aspect-ratio: 16 / 9;
-            background: #000;
+            background: #0a0e1a;
+            overflow: hidden;
             display: flex;
             justify-content: center;
             align-items: center;
@@ -637,6 +657,8 @@ HTML_TEMPLATE = """
             height: 100%;
             object-fit: cover;
             display: block;
+            position: relative;
+            z-index: 2;
         }
 
         .skeleton-loader {
@@ -655,6 +677,8 @@ HTML_TEMPLATE = """
             flex-direction: column;
             gap: 12px;
             color: var(--text-muted);
+            pointer-events: none;
+            transition: opacity 0.3s;
         }
 
         @keyframes skeleton-loading {
@@ -1176,6 +1200,19 @@ HTML_TEMPLATE = """
             const loader = document.getElementById('loader-' + cam_id);
             if (loader) loader.style.display = 'none';
         }
+
+        function monitorFeeds() {
+            ['cam1', 'cam2', 'cam3', 'cam4'].forEach(id => {
+                const img = document.getElementById('feed-' + id);
+                const loader = document.getElementById('loader-' + id);
+                if (img && loader) {
+                    if (img.naturalWidth > 0 && loader.style.display !== 'none') {
+                        loader.style.display = 'none';
+                    }
+                }
+            });
+        }
+        setInterval(monitorFeeds, 300);
 
         function onFeedError(cam_id) {
             const loader = document.getElementById('loader-' + cam_id);

@@ -1,3 +1,4 @@
+import os
 import ctypes
 import json
 import time
@@ -14,6 +15,7 @@ DLL_PATH = r'C:\Users\CHRISTOPHER\Downloads\YI_IOT_APP\PPPP_API.dll'
 CRYPTO_PATH = r'C:\Users\CHRISTOPHER\Downloads\YI_IOT_APP\libcrypto-1_1.dll'
 FFMPEG_PATH = r'C:\Users\CHRISTOPHER\Downloads\ffmpeg.exe'
 CONFIG_PATH = r'C:\Users\CHRISTOPHER\Downloads\cameras_p2p_config.json'
+PLACEHOLDER_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "placeholder.jpg")
 
 cdll = ctypes.CDLL(DLL_PATH)
 crypto = ctypes.CDLL(CRYPTO_PATH)
@@ -350,14 +352,26 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
 
+            placeholder_frame = None
+            if os.path.exists(PLACEHOLDER_PATH):
+                try:
+                    with open(PLACEHOLDER_PATH, "rb") as f:
+                        placeholder_frame = f.read()
+                except:
+                    pass
+
             last_sent_count = -1
             while True:
                 try:
+                    frame = None
                     with mgr.cond:
                         if mgr.frame_count == last_sent_count or not mgr.latest_frame:
-                            mgr.cond.wait(timeout=0.5)
+                            mgr.cond.wait(timeout=1.0)
                         frame = mgr.latest_frame
                         last_sent_count = mgr.frame_count
+
+                    if not frame and placeholder_frame:
+                        frame = placeholder_frame
 
                     if frame:
                         header = (
