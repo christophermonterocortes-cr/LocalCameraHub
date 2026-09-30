@@ -119,6 +119,10 @@ class YiCameraStreamer:
                 FFMPEG_PATH,
                 '-y',
                 '-loglevel', 'error',
+                '-fflags', 'nobuffer',
+                '-flags', 'low_delay',
+                '-probesize', '32',
+                '-analyzeduration', '0',
                 '-f', 'h264',
                 '-i', 'pipe:0',
                 '-f', 'image2pipe',
@@ -175,49 +179,59 @@ class YiCameraStreamer:
             reader_thread = threading.Thread(target=ffmpeg_reader, daemon=True)
             reader_thread.start()
 
-            last_read_success = time.time()
-            consecutive_errors = 0
+            ffmpeg_lock = threading.Lock()
+            session_active = threading.Event()
+            session_active.set()
+            last_frame_rx = [time.time()]
 
-            try:
-                while self.running:
-                    received_any = False
-                    for ch in [2, 3]:
-                        hdr_len = ctypes.c_int(8)
-                        ret = cdll.PPPP_Read(sid, ctypes.c_byte(ch), buf, ctypes.byref(hdr_len), 80)
-                        if ret >= 0 and hdr_len.value >= 8:
-                            body_len = struct.unpack_from('>I', buf.raw, 4)[0]
-                            if 0 < body_len <= 1048576:
-                                b_len = ctypes.c_int(body_len)
-                                ret2 = cdll.PPPP_Read(sid, ctypes.c_byte(ch), buf, ctypes.byref(b_len), 1500)
-                                if ret2 >= 0 and b_len.value > 24:
-                                    raw_frame = bytearray(buf.raw[:b_len.value])
-                                    if raw_frame[2] & 1:
-                                        crypto.AES_ecb_encrypt(bytes(raw_frame[28:44]), dec_buf, ctypes.byref(aes_key), 0)
-                                        raw_frame[28:44] = dec_buf.raw
-                                        crypto.AES_ecb_encrypt(bytes(raw_frame[44:60]), dec_buf, ctypes.byref(aes_key), 0)
-                                        raw_frame[44:60] = dec_buf.raw
-                                    
-                                    h264_nal = bytes(raw_frame[24:])
-                                    try:
+            def channel_reader(ch_num):
+                ch_buf = ctypes.create_string_buffer(1048576)
+                ch_dec = ctypes.create_string_buffer(16)
+                while self.running and session_active.is_set():
+                    hdr_len = ctypes.c_int(8)
+                    ret = cdll.PPPP_Read(sid, ctypes.c_byte(ch_num), ch_buf, ctypes.byref(hdr_len), 1500)
+                    if ret >= 0 and hdr_len.value >= 8:
+                        body_len = struct.unpack_from('>I', ch_buf.raw, 4)[0]
+                        if 0 < body_len <= 1048576:
+                            b_len = ctypes.c_int(body_len)
+                            ret2 = cdll.PPPP_Read(sid, ctypes.c_byte(ch_num), ch_buf, ctypes.byref(b_len), 1500)
+                            if ret2 >= 0 and b_len.value > 24:
+                                raw_frame = bytearray(ch_buf.raw[:b_len.value])
+                                if raw_frame[2] & 1:
+                                    crypto.AES_ecb_encrypt(bytes(raw_frame[28:44]), ch_dec, ctypes.byref(aes_key), 0)
+                                    raw_frame[28:44] = ch_dec.raw
+                                    crypto.AES_ecb_encrypt(bytes(raw_frame[44:60]), ch_dec, ctypes.byref(aes_key), 0)
+                                    raw_frame[44:60] = ch_dec.raw
+                                
+                                h264_nal = bytes(raw_frame[24:])
+                                try:
+                                    with ffmpeg_lock:
                                         proc.stdin.write(h264_nal)
                                         proc.stdin.flush()
-                                        received_any = True
-                                        consecutive_errors = 0
-                                        last_read_success = time.time()
-                                    except (BrokenPipeError, OSError):
-                                        break
-                        elif ret < 0 and ret != -3003: # -3003 is read timeout which is normal
-                            consecutive_errors += 1
+                                    last_frame_rx[0] = time.time()
+                                except (BrokenPipeError, OSError):
+                                    session_active.clear()
+                                    break
+                    elif ret < 0 and ret != -3003:
+                        if ret in (-3012, -3006, -3001):
+                            session_active.clear()
+                            break
 
-                    if consecutive_errors > 20 or (time.time() - last_read_success > 12.0):
-                        print(f"[{self.cam_id}] Stream stalled or session lost. Reconnecting...")
+            ch2_t = threading.Thread(target=channel_reader, args=(2,), daemon=True)
+            ch3_t = threading.Thread(target=channel_reader, args=(3,), daemon=True)
+            ch2_t.start()
+            ch3_t.start()
+
+            try:
+                while self.running and session_active.is_set():
+                    if time.time() - last_frame_rx[0] > 12.0:
+                        print(f"[{self.cam_id}] Stream stalled. Reconnecting...")
                         break
-
-                    if not received_any:
-                        time.sleep(0.005)
-
+                    time.sleep(0.2)
             except Exception as e:
-                print(f"[{self.cam_id}] Exception in stream loop: {e}")
+                print(f"[{self.cam_id}] Exception in session monitor: {e}")
+            finally:
+                session_active.clear()
             finally:
                 self.online = False
                 self.sid = -1

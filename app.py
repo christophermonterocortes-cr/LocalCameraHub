@@ -21,7 +21,7 @@ def proxy_p2p_mjpeg(cam_id):
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             while True:
-                chunk = r.read(4096)
+                chunk = r.read(16384)
                 if not chunk:
                     break
                 yield chunk
