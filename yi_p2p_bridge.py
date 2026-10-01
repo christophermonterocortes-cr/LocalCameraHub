@@ -223,7 +223,7 @@ class YiCameraStreamer:
                 '-i', 'pipe:0',
                 '-pix_fmt', 'yuv420p',
                 '-f', 'mjpeg',
-                '-q:v', '5',
+                '-q:v', '2',
                 'pipe:1'
             ]
             try:
@@ -364,7 +364,7 @@ class YiCameraStreamer:
             ch0_t = threading.Thread(target=channel_0_reader, daemon=True)
             ch0_t.start()
 
-            # Request video stream on Channel 0
+            # Request video stream on Channel 0 (1280x720 HD resolution: byte 1 = 1)
             payload = bytes([1, 1, 1, 0])
             hdr = struct.pack('>BBHI', 1, 3, 0, 40 + len(payload))
             cmd_hdr = struct.pack('>HHHH', 9029, 1, 0, len(payload)) + auth_bytes

@@ -33,7 +33,7 @@ CAMERAS = {
         "id": "cam1",
         "name": "Camera 1 (Macro-Video)",
         "ip": "192.168.0.238",
-        "rtsp": "rtsp://192.168.0.238/live/ch00_1",
+        "rtsp": "rtsp://192.168.0.238/live/ch00_0",
         "ptz_profile": "stream0_0",
         "resolution": "1280x720 HD",
         "codec": "H.264",
@@ -104,8 +104,8 @@ def generate_mjpeg(rtsp_url):
         "-f", "image2pipe",
         "-pix_fmt", "yuvj420p",
         "-vcodec", "mjpeg",
-        "-q:v", "6",
-        "-r", "15",
+        "-q:v", "2",
+        "-r", "25",
         "-"
     ]
     proc = subprocess.Popen(
@@ -730,7 +730,10 @@ HTML_TEMPLATE = """
         .cam-video-wrapper img {
             width: 100%;
             height: 100%;
-            object-fit: cover;
+            object-fit: contain;
+            background: #000;
+            image-rendering: -webkit-optimize-contrast;
+            image-rendering: high-quality;
             display: block;
             position: relative;
             z-index: 2;
