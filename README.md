@@ -213,11 +213,87 @@ LocalCameraHub/
 │   └── Factory/
 │       ├── config.sh
 │       └── init.sh
+├── mediamtx.yml                    # MediaMTX unified RTSP server configuration
 ├── .gitignore
 └── README.md
 ```
 
+## RTSP Server & Frigate NVR Integration
+
+The system includes a high-performance **MediaMTX** RTSP server running on port `8554`. It converts both YI IoT P2P camera feeds and ONVIF streams into clean, unified, low-latency RTSP feeds for NVRs like **Frigate**, **Home Assistant**, or **VLC**.
+
+### Unified RTSP Endpoints
+
+| Camera | Hardware | Type | RTSP URL |
+| :--- | :--- | :--- | :--- |
+| **Cam 1** | Macro-Video | ONVIF | `rtsp://<HOST_IP>:8554/cam1` |
+| **Cam 2** | Macro-Video | ONVIF | `rtsp://<HOST_IP>:8554/cam2` |
+| **Cam 3** | YI IoT (Storage) | P2P -> RTSP | `rtsp://<HOST_IP>:8554/cam3` |
+| **Cam 4** | YI IoT (Cámara2) | P2P -> RTSP | `rtsp://<HOST_IP>:8554/cam4` |
+
+*Note: For this host PC (`192.168.0.46`), replace `<HOST_IP>` with `192.168.0.46`.*
+
+### Frigate NVR Configuration (`config.yml`)
+
+Add the following to your Frigate `config.yml`:
+
+```yaml
+cameras:
+  cam1:
+    ffmpeg:
+      inputs:
+        - path: rtsp://192.168.0.46:8554/cam1
+          input_args: preset-rtsp-generic
+          roles:
+            - detect
+            - record
+    detect:
+      width: 640
+      height: 480
+      fps: 5
+
+  cam2:
+    ffmpeg:
+      inputs:
+        - path: rtsp://192.168.0.46:8554/cam2
+          input_args: preset-rtsp-generic
+          roles:
+            - detect
+            - record
+    detect:
+      width: 1280
+      height: 720
+      fps: 5
+
+  cam3:
+    ffmpeg:
+      inputs:
+        - path: rtsp://192.168.0.46:8554/cam3
+          input_args: preset-rtsp-generic
+          roles:
+            - detect
+            - record
+    detect:
+      width: 1280
+      height: 720
+      fps: 5
+
+  cam4:
+    ffmpeg:
+      inputs:
+        - path: rtsp://192.168.0.46:8554/cam4
+          input_args: preset-rtsp-generic
+          roles:
+            - detect
+            - record
+    detect:
+      width: 1280
+      height: 720
+      fps: 5
+```
+
 ## Troubleshooting
+
 
 ### P2P Camera shows "Stream reconnecting"
 - Check that the P2P bridge is running on port 8084

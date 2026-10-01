@@ -221,6 +221,12 @@ class YiCameraStreamer:
                 '-flags', 'low_delay',
                 '-f', 'h264',
                 '-i', 'pipe:0',
+                '-map', '0:v',
+                '-c:v', 'copy',
+                '-f', 'rtsp',
+                '-rtsp_transport', 'tcp',
+                f'rtsp://127.0.0.1:8554/{self.cam_id}',
+                '-map', '0:v',
                 '-pix_fmt', 'yuv420p',
                 '-f', 'mjpeg',
                 '-q:v', '2',
@@ -577,7 +583,24 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.send_response(404)
         self.end_headers()
 
+MEDIAMTX_DIR = r'C:\Users\CHRISTOPHER\Downloads\mediamtx'
+MEDIAMTX_EXE = os.path.join(MEDIAMTX_DIR, 'mediamtx.exe')
+
+def ensure_mediamtx():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        s.connect(('127.0.0.1', 8554))
+        s.close()
+        return
+    except:
+        pass
+    if os.path.exists(MEDIAMTX_EXE):
+        print("[MediaMTX] Starting RTSP server on :8554...")
+        subprocess.Popen([MEDIAMTX_EXE], cwd=MEDIAMTX_DIR, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1.5)
+
 def main():
+    ensure_mediamtx()
     with open(CONFIG_PATH, 'r') as f:
         cams = json.load(f)
 
