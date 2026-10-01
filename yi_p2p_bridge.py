@@ -131,6 +131,34 @@ class YiCameraStreamer:
         self.thread = threading.Thread(target=self._run_loop, daemon=True)
         self.thread.start()
 
+    def reload_config(self):
+        try:
+            if os.path.exists(CONFIG_PATH):
+                with open(CONFIG_PATH, 'r') as f:
+                    cams = json.load(f)
+                for cam in cams:
+                    if self.uid == cam.get("uid"):
+                        new_pwd = cam.get("password")
+                        if new_pwd and new_pwd != self.pwd:
+                            print(f"[{self.cam_id}] Password updated from config: {self.pwd[:3]}*** -> {new_pwd[:3]}***")
+                            self.pwd = new_pwd
+                            self.config = cam
+                            return True
+        except Exception as e:
+            print(f"[{self.cam_id}] Error reading config: {e}")
+        return False
+
+    def refresh_from_cloud(self):
+        print(f"[{self.cam_id}] Triggering cloud P2P credential refresh...")
+        script_path = r'C:\Users\CHRISTOPHER\Downloads\get_cam_p2p_info.py'
+        if os.path.exists(script_path):
+            try:
+                subprocess.run(["python", script_path], timeout=15, capture_output=True)
+                return self.reload_config()
+            except Exception as e:
+                print(f"[{self.cam_id}] Cloud refresh script failed: {e}")
+        return False
+
     def make_auth(self):
         chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
         nonce = "".join(random.choice(chars) for _ in range(15))
@@ -143,12 +171,13 @@ class YiCameraStreamer:
 
     def _run_loop(self):
         aes_key = AES_KEY()
-        crypto.AES_set_decrypt_key((self.pwd + "0").encode('ascii'), 128, ctypes.byref(aes_key))
         st_buf = ctypes.create_string_buffer(256)
 
         while self.running:
             self.online = False
             sid = -1
+            self.reload_config()
+            crypto.AES_set_decrypt_key((self.pwd + "0").encode('ascii'), 128, ctypes.byref(aes_key))
             print(f"[{self.cam_id}] Connecting to {self.name} ({self.uid})...")
             for attempt in range(8):
                 if not self.running:
@@ -212,6 +241,7 @@ class YiCameraStreamer:
 
             session_active = threading.Event()
             session_active.set()
+            auth_failed = [False]
             ffmpeg_lock = threading.Lock()
             last_frame_rx = [time.time()]
 
@@ -320,6 +350,13 @@ class YiCameraStreamer:
                                 r_cmd, r_resp, r_seq, r_ex = struct.unpack_from('>HHHH', raw_bytes, 0)
                                 r_status = struct.unpack_from('>i', raw_bytes, 8)[0] if len(raw_bytes) >= 12 else 0
                                 print(f"[{self.cam_id}] Ch0 RX req_cmd=0x{r_cmd:04x} resp_cmd=0x{r_resp:04x} seq={r_seq} status={r_status} len={len(raw_bytes)} hex={raw_bytes[:24].hex()}")
+                                if r_status == 1:
+                                    print(f"[{self.cam_id}] Auth rejected (status=1). Triggering credential refresh...")
+                                    auth_failed[0] = True
+                                    if not self.reload_config():
+                                        self.refresh_from_cloud()
+                                    session_active.clear()
+                                    break
                     elif ret < 0 and ret not in (-3003, -3004):
                         if ret in (-3014, -3012, -3006, -3001):
                             break
@@ -338,6 +375,9 @@ class YiCameraStreamer:
             stream_start_time = time.time()
             try:
                 while self.running and session_active.is_set():
+                    if auth_failed[0]:
+                        print(f"[{self.cam_id}] Reconnecting immediately due to auth rejection...")
+                        break
                     chk = cdll.PPPP_Check(sid, st_buf)
                     if chk < 0:
                         print(f"[{self.cam_id}] PPPP_Check failed ({chk}). Reconnecting...")
