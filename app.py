@@ -311,8 +311,8 @@ def ptz_control(cam_id, direction=None):
         direction = request.args.get("dir", "stop").lower()
     else:
         direction = direction.lower()
-    speed = float(request.args.get("speed", 0.25))
-    duration = float(request.args.get("duration", 0.25))
+    speed = float(request.args.get("speed", 0.15))
+    duration = float(request.args.get("duration", 0.18))
 
     if cam.get("type") == "yi_p2p":
         # Proxy PTZ command to P2P bridge
@@ -1361,16 +1361,16 @@ HTML_TEMPLATE = """
                     duration = 0.90;
                 }
             } else {
-                // Calibrated ONVIF sensitivity (cam1, cam2): micro-nudge by default
+                // Calibrated ONVIF sensitivity (cam1, cam2): ultra-smooth micro-nudge
                 if (ptzSensitivity === 'micro') {
-                    speed = 0.18;
-                    duration = 0.20;
+                    speed = 0.12;
+                    duration = 0.15;
                 } else if (ptzSensitivity === 'sweep') {
-                    speed = 0.50;
-                    duration = 0.60;
+                    speed = 0.28;
+                    duration = 0.40;
                 } else {
-                    speed = 0.25;
-                    duration = 0.30;
+                    speed = 0.16;
+                    duration = 0.22;
                 }
             }
 

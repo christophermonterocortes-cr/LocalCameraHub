@@ -22,7 +22,7 @@ class OnvifPtzBridgeHandler(BaseHTTPRequestHandler):
     host = "192.168.0.245"
 
     def log_message(self, format, *args):
-        pass
+        print(f"[{self.cam_id}] " + (format % args))
 
     def do_POST(self):
         content_len = int(self.headers.get("Content-Length", 0))
@@ -145,10 +145,12 @@ class OnvifPtzBridgeHandler(BaseHTTPRequestHandler):
       </tptz:PTZNode>
     </tptz:GetNodesResponse>""")
         elif "ContinuousMove" in post_data:
+            print(f"[{self.cam_id}] ContinuousMove raw XML snippet: {post_data[:300]}")
             x_match = re.search(r'x=["\']?([-0-9.]+)["\']?', post_data)
             y_match = re.search(r'y=["\']?([-0-9.]+)["\']?', post_data)
             x = float(x_match.group(1)) if x_match else 0.0
             y = float(y_match.group(1)) if y_match else 0.0
+            print(f"[{self.cam_id}] Extracted x={x}, y={y}")
             
             direction = None
             if abs(x) > abs(y):
@@ -160,14 +162,22 @@ class OnvifPtzBridgeHandler(BaseHTTPRequestHandler):
 
             if direction:
                 try:
-                    urllib.request.urlopen(f"http://127.0.0.1:8084/{self.cam_id}/ptz?dir={direction}", timeout=1)
+                    if self.cam_id in ("cam3", "cam4"):
+                        urllib.request.urlopen(f"http://127.0.0.1:8084/{self.cam_id}/ptz?dir={direction}", timeout=1)
+                    else:
+                        # Calibrated micro-nudge for cam1 and cam2 to prevent overshooting:
+                        # speed=0.15, duration=0.18s with auto-stop
+                        urllib.request.urlopen(f"http://127.0.0.1:8080/api/ptz/{self.cam_id}?dir={direction}&speed=0.15&duration=0.18", timeout=1)
                 except Exception as e:
                     pass
 
             resp = make_soap_response("<tptz:ContinuousMoveResponse/>")
         elif "Stop" in post_data:
             try:
-                urllib.request.urlopen(f"http://127.0.0.1:8084/{self.cam_id}/ptz?dir=stop", timeout=1)
+                if self.cam_id in ("cam3", "cam4"):
+                    urllib.request.urlopen(f"http://127.0.0.1:8084/{self.cam_id}/ptz?dir=stop", timeout=1)
+                else:
+                    urllib.request.urlopen(f"http://127.0.0.1:8080/api/ptz/{self.cam_id}?dir=stop", timeout=1)
             except Exception as e:
                 pass
             resp = make_soap_response("<tptz:StopResponse/>")
@@ -181,20 +191,27 @@ class OnvifPtzBridgeHandler(BaseHTTPRequestHandler):
         self.wfile.write(resp)
 
 def start_onvif_bridge(cam_id, port, host="192.168.0.245"):
-    handler = type(f"Handler_{cam_id}", (OnvifPtzBridgeHandler,), {"cam_id": cam_id, "port": port, "host": host})
-    server = HTTPServer(("0.0.0.0", port), handler)
-    t = threading.Thread(target=server.serve_forever, daemon=True)
-    t.start()
-    print(f"[ONVIF Bridge] Running for {cam_id} on port {port} (host: {host})")
-    return server
+    try:
+        handler = type(f"Handler_{cam_id}", (OnvifPtzBridgeHandler,), {"cam_id": cam_id, "port": port, "host": host})
+        server = HTTPServer(("0.0.0.0", port), handler)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        print(f"[ONVIF Bridge] Running for {cam_id} on port {port} (host: {host})")
+        return server
+    except Exception as e:
+        print(f"[ONVIF Bridge] Could not start port {port} for {cam_id}: {e}")
+        return None
 
 if __name__ == "__main__":
+    s1 = start_onvif_bridge("cam1", 8896)
+    s2 = start_onvif_bridge("cam2", 8895)
     s3 = start_onvif_bridge("cam3", 8898)
     s4 = start_onvif_bridge("cam4", 8897)
-    print("ONVIF Bridges active on 8898 (cam3) and 8897 (cam4). Press Ctrl+C to stop.")
+    print("ONVIF Bridges active on 8896 (cam1), 8895 (cam2), 8898 (cam3), 8897 (cam4).")
     import time
     try:
         while True:
             time.sleep(1)
     except KeyboardInterrupt:
         pass
+

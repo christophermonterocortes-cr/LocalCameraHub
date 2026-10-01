@@ -5,7 +5,7 @@ echo "[LocalCameraHub] Starting Wine YI P2P Bridge on :8084..."
 wine /app/python32/python.exe -u /app/yi_p2p_bridge_linux.py &
 P2P_PID=$!
 
-echo "[LocalCameraHub] Starting ONVIF PTZ Bridge on :8898 (cam3) & :8897 (cam4)..."
+echo "[LocalCameraHub] Starting ONVIF PTZ Bridge on :8896 (cam1), :8895 (cam2), :8898 (cam3) & :8897 (cam4)..."
 python3 -u /app/onvif_bridge.py &
 ONVIF_PID=$!
 

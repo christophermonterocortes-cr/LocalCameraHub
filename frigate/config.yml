@@ -32,8 +32,8 @@ cameras:
       height: 480
       fps: 5
     onvif:
-      host: 192.168.0.238
-      port: 8899
+      host: 192.168.0.245
+      port: 8896
       user: admin
       password: admin
 
@@ -50,8 +50,8 @@ cameras:
       height: 720
       fps: 5
     onvif:
-      host: 192.168.0.11
-      port: 8899
+      host: 192.168.0.245
+      port: 8895
       user: admin
       password: admin
 
