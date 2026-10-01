@@ -1,0 +1,26 @@
+version: "3.9"
+
+services:
+  frigate:
+    container_name: frigate
+    privileged: true
+    restart: unless-stopped
+    image: ghcr.io/blakeblackshear/frigate:stable
+    shm_size: "256mb"
+    volumes:
+      - ./config.yml:/config/config.yml
+      - ./storage:/media/frigate
+      - type: tmpfs
+        target: /tmp/cache
+        tmpfs:
+          size: 1000000000
+    ports:
+      - "8971:8971"       # Frigate Web UI (Auth enabled / HTTPS)
+      - "5001:5000"       # Frigate Unauthenticated Web UI / API
+      - "8555:8554"       # RTSP restream from go2rtc (port 8555 to avoid host 8554)
+      - "8556:8555/tcp"   # WebRTC over TCP
+      - "8556:8555/udp"   # WebRTC over UDP
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - FRIGATE_RTSP_PASSWORD=password

@@ -1637,9 +1637,18 @@ def ensure_mediamtx():
 
 if __name__ == "__main__":
     ensure_mediamtx()
+    try:
+        import onvif_bridge
+        onvif_bridge.start_onvif_bridge("cam3", 8898)
+        onvif_bridge.start_onvif_bridge("cam4", 8897)
+        print("[ONVIF Bridge] Native ONVIF PTZ bridges started on ports 8898 (cam3) and 8897 (cam4)")
+    except Exception as e:
+        print(f"[ONVIF Bridge] Could not start ONVIF bridge: {e}")
+
     print("=" * 60)
     print("Local Camera Hub starting on http://localhost:5000")
     print("Direct RTSP feeds + PTZ Motors + SD Card Video Browser")
     print("=" * 60)
     app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+
 
