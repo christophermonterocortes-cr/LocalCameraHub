@@ -33,7 +33,7 @@ CAMERAS = {
         "id": "cam1",
         "name": "Camera 1 (Macro-Video)",
         "ip": "192.168.0.238",
-        "rtsp": "rtsp://192.168.0.46:8554/cam1",
+        "rtsp": "rtsp://192.168.0.245:8554/cam1",
         "ptz_profile": "stream0_0",
         "resolution": "1280x720 HD",
         "codec": "H.264",
@@ -45,7 +45,7 @@ CAMERAS = {
         "id": "cam2",
         "name": "Camera 2 (Macro-Video)",
         "ip": "192.168.0.11",
-        "rtsp": "rtsp://192.168.0.46:8554/cam2",
+        "rtsp": "rtsp://192.168.0.245:8554/cam2",
         "ptz_profile": "PROFILE_000",
         "resolution": "1280x720 HD",
         "codec": "H.264",
@@ -57,7 +57,7 @@ CAMERAS = {
         "id": "cam3",
         "name": "Camera 3 (Storage - YI IoT)",
         "ip": "192.168.0.4",
-        "rtsp": "rtsp://192.168.0.46:8554/cam3",
+        "rtsp": "rtsp://192.168.0.245:8554/cam3",
         "ptz_profile": None,
         "resolution": "1280x720 HD",
         "codec": "H.264 (P2P -> RTSP)",
@@ -69,7 +69,7 @@ CAMERAS = {
         "id": "cam4",
         "name": "Camera 4 (Cámara2 - YI IoT)",
         "ip": "192.168.0.135",
-        "rtsp": "rtsp://192.168.0.46:8554/cam4",
+        "rtsp": "rtsp://192.168.0.245:8554/cam4",
         "ptz_profile": None,
         "resolution": "1280x720 HD",
         "codec": "H.264 (P2P -> RTSP)",
@@ -283,7 +283,7 @@ def snapshot(cam_id):
         snap_path
     ]
     try:
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
         if os.path.exists(snap_path) and os.path.getsize(snap_path) > 1000:
             return send_file(snap_path, mimetype="image/jpeg", as_attachment=False)
     except:
@@ -1645,10 +1645,11 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"[ONVIF Bridge] Could not start ONVIF bridge: {e}")
 
+    port = int(os.environ.get("PORT", 8080))
     print("=" * 60)
-    print("Local Camera Hub starting on http://localhost:5000")
+    print(f"Local Camera Hub starting on port {port}")
     print("Direct RTSP feeds + PTZ Motors + SD Card Video Browser")
     print("=" * 60)
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=port, debug=False, threaded=True)
 
 

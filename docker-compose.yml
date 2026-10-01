@@ -1,0 +1,48 @@
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: mediamtx
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml
+
+  localcamerahub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: localcamerahub:latest
+    container_name: localcamerahub
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - .:/app
+      - ./storage:/media/frigate:ro
+      - /tmp:/tmp
+    depends_on:
+      - mediamtx
+
+  frigate:
+    image: ghcr.io/blakeblackshear/frigate:stable
+    container_name: frigate
+    privileged: true
+    restart: unless-stopped
+    shm_size: "512mb"
+    volumes:
+      - ./frigate/config.yml:/config/config.yml
+      - ./storage:/media/frigate
+      - type: tmpfs
+        target: /tmp/cache
+        tmpfs:
+          size: 1000000000
+    ports:
+      - "0.0.0.0:8971:8971"
+      - "0.0.0.0:5001:5000"
+      - "0.0.0.0:8555:8554"
+      - "0.0.0.0:8556:8555/tcp"
+      - "0.0.0.0:8556:8555/udp"
+    environment:
+      - FRIGATE_RTSP_PASSWORD=password
+    depends_on:
+      - mediamtx
+      - localcamerahub

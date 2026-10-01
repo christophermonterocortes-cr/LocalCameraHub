@@ -201,10 +201,17 @@ Replace cloud-dependent NVR systems with a lightweight, transparent, open-source
 ```
 LocalCameraHub/
 ├── app.py                          # Flask dashboard + ONVIF PTZ + RTSP proxy
-├── yi_p2p_bridge.py                # Native P2P bridge for YI IoT cameras
+├── Dockerfile                      # 32-bit Wine + FFmpeg container image for Linux/TrueNAS
+├── docker-compose.yml              # Multi-container orchestration (MediaMTX + Hub + Frigate)
+├── entrypoint.sh                   # Container entrypoint starting P2P bridge, ONVIF bridge, & Flask
+├── yi_p2p_bridge.py                # Native Windows P2P bridge for YI IoT cameras
+├── yi_p2p_bridge_linux.py          # Linux/Wine P2P bridge streaming H.264 over local TCP
+├── onvif_bridge.py                 # ONVIF SOAP to P2P PTZ motor translation service
 ├── get_cam_p2p_info.py             # Cloud login & config generator
 ├── cameras_p2p_config.example.json # Template for P2P camera config
 ├── start_cameras.bat               # One-click Windows launcher
+├── frigate/
+│   └── config.yml                  # Frigate NVR configuration with ONVIF PTZ integration
 ├── sd_card_files/                  # Camera SD card configuration files
 │   ├── anyka_cfg.ini
 │   ├── README_SD.txt
@@ -231,18 +238,43 @@ The system includes a high-performance **MediaMTX** RTSP server running on port 
 | **Cam 3** | YI IoT (Storage) | P2P -> RTSP | `rtsp://<HOST_IP>:8554/cam3` |
 | **Cam 4** | YI IoT (Cámara2) | P2P -> RTSP | `rtsp://<HOST_IP>:8554/cam4` |
 
-*Note: For this host PC (`192.168.0.46`), replace `<HOST_IP>` with `192.168.0.46`.*
+*Note: Replace `<SERVER_IP>` with your server IP (e.g. `192.168.0.245`).*
 
-### Frigate NVR Configuration (`config.yml`)
+## Docker Deployment (TrueNAS SCALE / Linux)
+
+Run the entire surveillance stack 24/7 without needing a Windows machine running:
+
+```bash
+# 1. Clone the repository
+git clone https://github.com/christophermonterocortes-cr/LocalCameraHub.git
+cd LocalCameraHub
+
+# 2. Place your cameras_p2p_config.json in the project root
+cp /path/to/cameras_p2p_config.json .
+
+# 3. Start all services via Docker Compose
+docker compose up -d
+```
+
+### Services & Web Ports
+
+| Service | Port | Description |
+| :--- | :--- | :--- |
+| **LocalCameraHub** | `8080` | Glassmorphism live dashboard + PTZ controls |
+| **Frigate NVR** | `5001` / `8971` | AI NVR recording, scrubber timeline, object detection |
+| **MediaMTX** | `8554` | High-performance RTSP streaming server |
+| **ONVIF PTZ Bridge** | `8898` / `8897` | SOAP ONVIF PTZ service for Cam3 and Cam4 |
+
+### Frigate NVR Configuration (`frigate/config.yml`)
 
 Add the following to your Frigate `config.yml`:
 
 ```yaml
 cameras:
-  cam1:
+  cam1_macro:
     ffmpeg:
       inputs:
-        - path: rtsp://192.168.0.46:8554/cam1
+        - path: rtsp://192.168.0.245:8554/cam1
           input_args: preset-rtsp-generic
           roles:
             - detect
@@ -252,10 +284,10 @@ cameras:
       height: 480
       fps: 5
 
-  cam2:
+  cam2_macro:
     ffmpeg:
       inputs:
-        - path: rtsp://192.168.0.46:8554/cam2
+        - path: rtsp://192.168.0.245:8554/cam2
           input_args: preset-rtsp-generic
           roles:
             - detect
@@ -265,10 +297,10 @@ cameras:
       height: 720
       fps: 5
 
-  cam3:
+  cam3_yi_storage:
     ffmpeg:
       inputs:
-        - path: rtsp://192.168.0.46:8554/cam3
+        - path: rtsp://192.168.0.245:8554/cam3
           input_args: preset-rtsp-generic
           roles:
             - detect
@@ -277,11 +309,14 @@ cameras:
       width: 1280
       height: 720
       fps: 5
+    onvif:
+      host: 192.168.0.245
+      port: 8898
 
-  cam4:
+  cam4_yi_camara2:
     ffmpeg:
       inputs:
-        - path: rtsp://192.168.0.46:8554/cam4
+        - path: rtsp://192.168.0.245:8554/cam4
           input_args: preset-rtsp-generic
           roles:
             - detect
@@ -290,6 +325,9 @@ cameras:
       width: 1280
       height: 720
       fps: 5
+    onvif:
+      host: 192.168.0.245
+      port: 8897
 ```
 
 ## Troubleshooting

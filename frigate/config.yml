@@ -1,29 +1,28 @@
 mqtt:
   enabled: False
 
-# High-Performance OpenVINO / CPU Detector for 12th Gen Intel Core i9
+# Standard CPU Detector compatible with Intel Haswell i5-4308U
 detectors:
-  ov:
-    type: openvino
-    device: CPU
+  cpu:
+    type: cpu
 
 # High-speed WebRTC / MSE Live Viewing engine
 go2rtc:
   streams:
     cam1_macro:
-      - rtsp://192.168.0.46:8554/cam1
+      - rtsp://192.168.0.245:8554/cam1
     cam2_macro:
-      - rtsp://192.168.0.46:8554/cam2
+      - rtsp://192.168.0.245:8554/cam2
     cam3_yi_storage:
-      - rtsp://192.168.0.46:8554/cam3
+      - rtsp://192.168.0.245:8554/cam3
     cam4_yi_camara2:
-      - rtsp://192.168.0.46:8554/cam4
+      - rtsp://192.168.0.245:8554/cam4
 
 cameras:
   cam1_macro:
     ffmpeg:
       inputs:
-        - path: rtsp://192.168.0.46:8554/cam1
+        - path: rtsp://192.168.0.245:8554/cam1
           input_args: preset-rtsp-generic
           roles:
             - detect
@@ -39,7 +38,7 @@ cameras:
   cam2_macro:
     ffmpeg:
       inputs:
-        - path: rtsp://192.168.0.46:8554/cam2
+        - path: rtsp://192.168.0.245:8554/cam2
           input_args: preset-rtsp-generic
           roles:
             - detect
@@ -55,7 +54,7 @@ cameras:
   cam3_yi_storage:
     ffmpeg:
       inputs:
-        - path: rtsp://192.168.0.46:8554/cam3
+        - path: rtsp://192.168.0.245:8554/cam3
           input_args: preset-rtsp-generic
           roles:
             - detect
@@ -65,13 +64,13 @@ cameras:
       height: 720
       fps: 5
     onvif:
-      host: 192.168.0.46
+      host: 192.168.0.245
       port: 8898
 
   cam4_yi_camara2:
     ffmpeg:
       inputs:
-        - path: rtsp://192.168.0.46:8554/cam4
+        - path: rtsp://192.168.0.245:8554/cam4
           input_args: preset-rtsp-generic
           roles:
             - detect
@@ -81,7 +80,7 @@ cameras:
       height: 720
       fps: 5
     onvif:
-      host: 192.168.0.46
+      host: 192.168.0.245
       port: 8897
 
 record:

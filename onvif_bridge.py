@@ -19,7 +19,7 @@ def make_soap_response(body_xml):
 class OnvifPtzBridgeHandler(BaseHTTPRequestHandler):
     cam_id = "cam3"
     port = 8898
-    host = "192.168.0.46"
+    host = "192.168.0.245"
 
     def log_message(self, format, *args):
         pass
@@ -144,7 +144,7 @@ class OnvifPtzBridgeHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(resp)
 
-def start_onvif_bridge(cam_id, port, host="192.168.0.46"):
+def start_onvif_bridge(cam_id, port, host="192.168.0.245"):
     handler = type(f"Handler_{cam_id}", (OnvifPtzBridgeHandler,), {"cam_id": cam_id, "port": port, "host": host})
     server = HTTPServer(("0.0.0.0", port), handler)
     t = threading.Thread(target=server.serve_forever, daemon=True)
