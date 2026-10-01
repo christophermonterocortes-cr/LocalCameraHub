@@ -74,6 +74,16 @@ class OnvifPtzBridgeHandler(BaseHTTPRequestHandler):
           <tt:SourceToken>V_SRC_000</tt:SourceToken>
           <tt:Bounds x="0" y="0" width="1280" height="720"/>
         </tt:VideoSourceConfiguration>
+        <tt:VideoEncoderConfiguration token="V_ENC_000">
+          <tt:Name>V_ENC_000</tt:Name>
+          <tt:UseCount>1</tt:UseCount>
+          <tt:Encoding>H264</tt:Encoding>
+          <tt:Resolution>
+            <tt:Width>1280</tt:Width>
+            <tt:Height>720</tt:Height>
+          </tt:Resolution>
+          <tt:Quality>5</tt:Quality>
+        </tt:VideoEncoderConfiguration>
         <tt:PTZConfiguration token="PTZ_CFG_000">
           <tt:Name>PTZ_CFG_000</tt:Name>
           <tt:UseCount>1</tt:UseCount>
@@ -82,6 +92,17 @@ class OnvifPtzBridgeHandler(BaseHTTPRequestHandler):
         </tt:PTZConfiguration>
       </trt:Profiles>
     </trt:GetProfilesResponse>""")
+        elif "GetVideoSources" in post_data:
+            resp = make_soap_response("""
+    <trt:GetVideoSourcesResponse>
+      <trt:VideoSources token="V_SRC_000">
+        <tt:Framerate>20</tt:Framerate>
+        <tt:Resolution>
+          <tt:Width>1280</tt:Width>
+          <tt:Height>720</tt:Height>
+        </tt:Resolution>
+      </trt:VideoSources>
+    </trt:GetVideoSourcesResponse>""")
         elif "GetConfigurations" in post_data or "GetConfiguration" in post_data:
             resp = make_soap_response("""
     <tptz:GetConfigurationsResponse>
@@ -92,6 +113,21 @@ class OnvifPtzBridgeHandler(BaseHTTPRequestHandler):
         <tt:DefaultContinuousPanTiltVelocitySpace>http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace</tt:DefaultContinuousPanTiltVelocitySpace>
       </tptz:PTZConfiguration>
     </tptz:GetConfigurationsResponse>""")
+        elif "GetConfigurationOptions" in post_data:
+            resp = make_soap_response("""
+    <tptz:GetConfigurationOptionsResponse>
+      <tptz:PTZConfigurationOptions>
+        <tt:Spaces>
+          <tt:ContinuousPanTiltVelocitySpace>
+            <tt:URI>http://www.onvif.org/ver10/tptz/PanTiltSpaces/VelocityGenericSpace</tt:URI>
+            <tt:XRange><tt:Min>-1.0</tt:Min><tt:Max>1.0</tt:Max></tt:XRange>
+            <tt:YRange><tt:Min>-1.0</tt:Min><tt:Max>1.0</tt:Max></tt:YRange>
+          </tt:ContinuousPanTiltVelocitySpace>
+        </tt:Spaces>
+      </tptz:PTZConfigurationOptions>
+    </tptz:GetConfigurationOptionsResponse>""")
+        elif "GetPresets" in post_data:
+            resp = make_soap_response("<tptz:GetPresetsResponse/>")
         elif "GetNodes" in post_data or "GetNode" in post_data:
             resp = make_soap_response("""
     <tptz:GetNodesResponse>
