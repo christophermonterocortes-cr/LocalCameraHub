@@ -42,7 +42,10 @@ If you have a Linux machine, NAS, or Home Assistant server on your home network:
    ```powershell
    docker compose up -d
    ```
-5. Open Frigate: `http://localhost:8971` or `http://localhost:5001`.
+5. Open Frigate from any device on your LAN:
+   - Full Web UI (HTTPS / Auth): `http://192.168.0.46:8971`
+   - Direct Web UI (Unauthenticated): `http://192.168.0.46:5001`
+
 
 ---
 

@@ -610,11 +610,12 @@ def main():
         elif "671576" in cam["uid"]:
             CAMERA_MANAGERS["cam4"] = YiCameraStreamer("cam4", cam)
 
-    server = ThreadingHTTPServer(("127.0.0.1", 8084), BridgeHandler)
+    server = ThreadingHTTPServer(("0.0.0.0", 8084), BridgeHandler)
     print("="*60)
-    print("YI IoT P2P Bridge running on http://127.0.0.1:8084")
+    print("YI IoT P2P Bridge running on port 8084 (LAN accessible: http://192.168.0.46:8084)")
     print("Routes: /cam3/video, /cam3/snapshot, /cam4/video, /cam4/snapshot, /status")
     print("="*60)
+
     try:
         server.serve_forever()
     except KeyboardInterrupt:
